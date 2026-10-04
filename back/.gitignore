@@ -1,0 +1,38 @@
+# Credenciales — NUNCA subir a git
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+.vite/
+*.tsbuildinfo
+coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editores / SO
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Datos generados de la API
+*.sqlite
+*.sqlite3
+*.db
+data/
