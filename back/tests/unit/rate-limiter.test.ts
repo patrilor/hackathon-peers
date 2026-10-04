@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { RateLimiter, createRateLimiter } from '../../src/api/rate-limiter.js'
+import { HOUR_WINDOW_MS, RateLimiter, createRateLimiter } from '../../src/api/rate-limiter.js'
 import { createFakeClock } from '../helpers/fake-api.js'
 
 describe('RateLimiter', () => {
@@ -168,11 +168,131 @@ describe('RateLimiter', () => {
   })
 })
 
+describe('cuota horaria', () => {
+  /**
+   * Limitador con reloj y espera simulados.
+   *
+   * `sleep` avanza el reloj en vez de esperar de verdad, así que se puede
+   * comprobar que bloquea la petición *antes* de chamar a la tarea, que es
+   * justamente donde se gasta la cuota.
+   */
+  function fakeClock(): {
+    now: () => number
+    sleep: (ms: number) => Promise<void>
+    slept: number[]
+  } {
+    let moment = 0
+    const slept: number[] = []
+
+    return {
+      now: () => moment,
+      slept,
+      sleep: async (ms: number) => {
+        slept.push(ms)
+        moment += ms
+      },
+    }
+  }
+
+  it('para aunque la ventana de un minuto esté libre', async () => {
+    const clock = fakeClock()
+    // 2/min pasa de sobra en una hora; el tope de 3/h es el que manda.
+    const limiter = new RateLimiter({
+      minDelayMs: 0,
+      maxPerMinute: 2,
+      maxPerHour: 3,
+      now: clock.now,
+      sleep: clock.sleep,
+    })
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await limiter.run(async () => undefined)
+    }
+
+    // La cuarta esperó a que la primera saliera de la ventana horaria. No son
+    // 3 600 000 ms completos: la segunda ya había gastado parte de la hora, así
+    // que solo falta lo que queda.
+    expect(clock.slept.at(-1)).toBe(3_540_000)
+    expect(clock.now()).toBe(3_600_000)
+  })
+
+  it('la espera de la cuota horaria tiene en cuenta el delay mínimo', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({
+      minDelayMs: 550,
+      maxPerMinute: 100,
+      maxPerHour: 2,
+      now: clock.now,
+      sleep: clock.sleep,
+    })
+
+    await limiter.run(async () => undefined)
+    await limiter.run(async () => undefined)
+
+    // La segunda tuvo que cumplir el delay mínimo, pero no la cuota: aún cabía.
+    expect(clock.now()).toBe(550)
+
+    // Ya no cabe por hora, así que espera a que expire la primera: 1 h menos los
+    // 550 ms que se gastaron en la segunda.
+    await limiter.run(async () => undefined)
+
+    expect(clock.now()).toBe(3_600_000)
+  })
+
+  it('cuenta las peticiones que quedan por hora', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({
+      minDelayMs: 0,
+      maxPerMinute: 100,
+      maxPerHour: 3,
+      now: clock.now,
+      sleep: clock.sleep,
+    })
+
+    expect(limiter.remainingIn(HOUR_WINDOW_MS)).toBe(3)
+
+    await limiter.run(async () => undefined)
+
+    expect(limiter.remainingIn(HOUR_WINDOW_MS)).toBe(2)
+    expect(limiter.remainingIn(60_000)).toBe(99)
+  })
+
+  it('las peticiones viejas van saliendo de la cuota con el paso del tiempo', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({
+      minDelayMs: 0,
+      maxPerMinute: 100,
+      maxPerHour: 2,
+      now: clock.now,
+      sleep: clock.sleep,
+    })
+
+    await limiter.run(async () => undefined)
+    expect(limiter.remainingIn(HOUR_WINDOW_MS)).toBe(1)
+
+    await clock.sleep(3_600_001)
+
+    // Pasada la hora, la primera petición ya no cuenta.
+    expect(limiter.remainingIn(HOUR_WINDOW_MS)).toBe(2)
+  })
+
+  it('sin límite horario no inventa una ventana que no existe', () => {
+    const limiter = new RateLimiter({ minDelayMs: 550, maxPerMinute: 100 })
+
+    expect(limiter.remainingIn(HOUR_WINDOW_MS)).toBe(Number.POSITIVE_INFINITY)
+  })
+})
+
 describe('createRateLimiter', () => {
   it('traduce segundos a milisegundos y aplica los valores de la configuración', () => {
-    const limiter = createRateLimiter({ delaySeconds: 0.55, requestsPerMinute: 100 })
+    const limiter = createRateLimiter({
+      delaySeconds: 0.55,
+      requestsPerMinute: 100,
+      requestsPerHour: 1200,
+    })
 
     expect(limiter.minDelayMs).toBe(550)
     expect(limiter.maxPerMinute).toBe(100)
+    expect(limiter.remainingIn(HOUR_WINDOW_MS)).toBe(1200)
   })
 })

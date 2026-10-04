@@ -11,20 +11,14 @@ import { RateLimiter } from './rate-limiter.js'
 import { TokenManager } from './token-manager.js'
 import type { Env } from '../config/env.js'
 
-/**
- * Peticiones por minuto.
- *
- * El límite real de la 42 son 1200 por hora. Con el mínimo de 550 ms se llega
- * a unas 109 por minuto, así que el tope por minuto es lo que manda. Si alguna
- * vez se sube `API_REQUEST_DELAY_SECONDS` por debajo de 500 ms, este número
- * tiene que bajar con él o se pasa por la cuota horaria.
- */
-const MAX_REQUESTS_PER_MINUTE = 100
-
 export function createApiClient(env: Env, fetchImpl: typeof fetch = fetch): FortyTwoClient {
+  // Los tres topes salen del entorno, y no de constantes aquí: el CLI y el
+  // servidor tienen que gastar igual, o la cuota se consume a distinto ritmo
+  // según quién sincronice.
   const limiter = new RateLimiter({
     minDelayMs: Math.round(env.API_REQUEST_DELAY_SECONDS * 1000),
-    maxPerMinute: MAX_REQUESTS_PER_MINUTE,
+    maxPerMinute: env.SYNC_REQUESTS_PER_MINUTE,
+    maxPerHour: env.SYNC_REQUESTS_PER_HOUR,
   })
 
   const tokens = new TokenManager({

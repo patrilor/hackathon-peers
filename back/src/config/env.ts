@@ -115,9 +115,17 @@ const envSchema = z.object({
   PAGE_SIZE: z.coerce.number().int().positive().max(100).default(100),
   /**
    * Límite de peticiones por minuto de **nuestro propio** sincronizador.
-   * 1200/hora es el tope de la API; 100/min nos deja margen de sobra.
+   *
+   * Con 550 ms entre llamadas se llega a unas 109/min, así que 100 es el tope
+   * que manda. Este límite solo evita ráfagas: para la cuota hay que mirar
+   * `SYNC_REQUESTS_PER_HOUR`, porque 100/min son 6000/h.
    */
-  SYNC_REQUESTS_PER_MINUTE: z.coerce.number().int().positive().default(100),
+  SYNC_REQUESTS_PER_MINUTE: z.coerce.number().int().positive().max(600).default(100),
+  /**
+   * Límite de peticiones por hora. Es el tope real de la API de 42: pasarse
+   * devuelve `429 Spam Rate Limit Exceeded` y, si se insiste, cierran la app.
+   */
+  SYNC_REQUESTS_PER_HOUR: z.coerce.number().int().positive().max(1200).default(1200),
 })
 
 /** Configuración normalizada: el entorno validado más lo derivado de él. */
