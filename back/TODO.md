@@ -86,22 +86,36 @@ PENDIENTE FUERA DEL CÓDIGO: el panel de la app `78735` sigue con `public` y
 `profile`. `profile` no existe en 42; tiene que ser `user`. Hasta que se
 apruebe, el login contra la API real no se puede probar.
 
-## 6. Servidor Fastify `working`
+## 6. Servidor Fastify `finish`
 
-- [ ] `buildApp()` que devuelva la instancia lista para tests.
-- [ ] CORS con credenciales y lista de orígenes, nunca comodín.
-- [ ] Cookies, manejo de errores y `404` en JSON.
-- [ ] `GET /health` para UptimeRobot y para el despliegue.
-- [ ] `server.ts` con arranque y apagado limpios.
-- [ ] Tests de CORS: origen permitido, rechazado y preflight.
+- [x] `buildApp()` que devuelva la instancia lista para tests.
+- [x] CORS con credenciales y lista de orígenes, nunca comodín.
+- [x] Cookies, manejo de errores y `404` en JSON.
+- [x] `GET /health` para UptimeRobot y para el despliegue.
+- [x] `server.ts` con arranque y apagado limpios.
+- [x] Tests de CORS: origen permitido, rechazado y preflight.
 
-## 7. Tests de integración `pending`
+Nota: en el callback de OAuth hay que mandar **dos** cookies a la vez (borrar el
+estado y poner la sesión). Fastify **reemplaza** el `Set-Cookie` anterior en vez de
+añadirlo, así que se recogen en un array y se mandan juntas (`setCookies`).
+Mandar dos llamadas a `reply.header('Set-Cookie', …)` deja solo la última, y el
+navegador se queda sin sesión.
 
-- [ ] Servidor que simula la API de 42 (respuestas y errores reales).
-- [ ] Los 7 endpoints del contrato contra ese servidor.
-- [ ] Que `/projects/:id/peers` respects la regla de guardia.
-- [ ] Que sin cookie `/auth/me` devuelva 401 y los protegidos 401 también.
-- [ ] Boot de la app en `:memory:` para que los tests sean aislados.
+## 7. Tests de integración `finish`
+
+- [x] Servidor que simula la API de 42 (respuestas y errores reales).
+- [x] Los 7 endpoints del contrato contra ese servidor.
+- [x] Que `/projects/:id/peers` respecte la regla de guardia.
+- [x] Que sin cookie `/auth/me` devuelva 401 y los protegidos 401 también.
+- [x] Boot de la app en `:memory:` para que los tests sean aislados.
+
+Dos trampas que costaron una vuelta de tuerca, por si se repiten:
+
+- `inject().json()` devuelve `any`. El helper `json()` de `tests/helpers/test-app.ts`
+  lo parsea a `unknown` y cada test hace su propio cast, que es donde está el tipo.
+- El proveedor de la API usa `API_REQUEST_DELAY_SECONDS=0.001` en los tests. Con
+  los 550 ms reales, la suite tardaba 8 s; ahora tarda medio segundo. Los tests del
+  limitador cubren el retraso de verdad con reloj falso.
 
 ## 8. Documentación `pending`
 
