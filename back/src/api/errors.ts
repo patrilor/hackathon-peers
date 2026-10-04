@@ -27,9 +27,19 @@ export type ApiErrorBody = {
 /** Detalle de por qué se reintentó o no, para logs y tests. */
 export type ApiErrorOptions = {
   /** Ruta que se intentó llamar, sin el host. */
-  endpoint: string
-  /** Código normalizado. */
-  code: ApiErrorCode
+  /**
+   * Ruta llamada, para localizar el fallo en el log.
+   *
+   * Opcional: se deduce del status cuando no se indica.
+   */
+  endpoint?: string | undefined
+  /**
+   * Código normalizado.
+   *
+   * Opcional y derivado del status a propósito: obligar a repetir en cada
+   * `new` lo que `codeForStatus` ya sabe es una fuente de errores de copia.
+   */
+  code?: ApiErrorCode | undefined
   /** Cuerpo de la respuesta, si lo hubo y se pudo leer como JSON. */
   body?: ApiErrorBody | undefined
   /** Segundos que la API pidió esperar, vía `Retry-After`. */
@@ -61,11 +71,13 @@ export class ApiError extends Error {
   readonly retryAfterSeconds: number | undefined
   readonly retryable: boolean
 
-  constructor(message: string, status: number, options: ApiErrorOptions) {
+  // El objeto de detalles es opcional: para un error de estado no hay nada más
+  // que contar, y obligar a pasar un `{}` vacío en todas partes solo añade ruido.
+  constructor(message: string, status: number, options: ApiErrorOptions = {}) {
     super(message, { cause: options.cause })
     this.name = 'ApiError'
-    this.endpoint = options.endpoint
-    this.code = options.code
+    this.endpoint = options.endpoint ?? ''
+    this.code = options.code ?? codeForStatus(status)
     this.status = status
     this.body = options.body
     this.retryAfterSeconds = options.retryAfterSeconds
@@ -132,8 +144,7 @@ export function apiErrorFromResponse(
   const retryAfter = parseRetryAfter(headers.get('retry-after'))
 
   // El mensaje de 42 suele venir en `message`; algunos endpoints solo mandan `error`.
-  const message =
-    body?.message ?? body?.error ?? `La API de 42 respondió ${status} a ${endpoint}`
+  const message = body?.message ?? body?.error ?? `La API de 42 respondió ${status} a ${endpoint}`
 
   return new ApiError(message, status, {
     endpoint,
@@ -144,6 +155,16 @@ export function apiErrorFromResponse(
 }
 
 /** Construye el error de un fallo de red, sin respuesta HTTP. */
+/**
+ * ¿El error es de credenciales?
+ *
+ * Corta la sincronización entera: si el token no vale, las siguientes llamadas
+ * fallarán igual y solo gastarían cuota y tiempo.
+ */
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof ApiError && (error.code === 'unauthorized' || error.code === 'forbidden')
+}
+
 export function apiErrorFromNetwork(endpoint: string, cause: unknown): ApiError {
   const isTimeout = cause instanceof Error && cause.name === 'TimeoutError'
 

@@ -74,10 +74,7 @@ describe('orígenes permitidos para CORS', () => {
       FRONTEND_ORIGINS: 'http://localhost:5173,https://sanatorio-42.vercel.app',
     })
 
-    expect(env.allowedOrigins).toEqual([
-      'http://localhost:5173',
-      'https://sanatorio-42.vercel.app',
-    ])
+    expect(env.allowedOrigins).toEqual(['http://localhost:5173', 'https://sanatorio-42.vercel.app'])
   })
 
   it('acepta espacios como separador y quita la barra final', () => {

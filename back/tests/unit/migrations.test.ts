@@ -8,7 +8,12 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { assertSchemaIsCurrent, migrate, openDatabase, schemaVersion } from '../../src/db/database.js'
+import {
+  assertSchemaIsCurrent,
+  migrate,
+  openDatabase,
+  schemaVersion,
+} from '../../src/db/database.js'
 import { LATEST_VERSION } from '../../src/db/migrations.js'
 
 describe('migraciones', () => {

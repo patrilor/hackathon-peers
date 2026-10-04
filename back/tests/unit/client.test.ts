@@ -285,10 +285,7 @@ describe('paginación', () => {
   it('recoge todas las páginas hasta que una viene incompleta', async () => {
     const full = Array.from({ length: 100 }, (_, i) => ({ id: i, login: `user${i}` }))
     const { client, fake } = makeClient(
-      [
-        { body: full },
-        { body: [{ id: 100, login: 'user100' }] },
-      ],
+      [{ body: full }, { body: [{ id: 100, login: 'user100' }] }],
       { pageSize: 100 },
     )
 

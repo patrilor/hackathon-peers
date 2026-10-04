@@ -38,9 +38,7 @@ type UserProjectRow = { project_id: number; name: string; status: string }
  * en la lista de peers con un status que el front no sabe interpretar.
  */
 export function normalizeStatus(status: string): ProjectStatus | null {
-  return status === PROJECT_STATUS.IN_PROGRESS || status === PROJECT_STATUS.FINISHED
-    ? status
-    : null
+  return status === PROJECT_STATUS.IN_PROGRESS || status === PROJECT_STATUS.FINISHED ? status : null
 }
 
 export function createProjectsRepository(db: Db) {
@@ -63,30 +61,72 @@ export function createProjectsRepository(db: Db) {
    * persona, que es la unidad por la que sincronizamos: si alguien deja un
    * proyecto, su fila desaparece y con ella desaparece de los peers.
    */
-  const replaceForUser = db.transaction(
-    (login: string, entries: readonly ApiProjectUser[]) => {
-      db.prepare('DELETE FROM user_projects WHERE login = ?').run(login)
+  /** ¿El catálogo conoce este proyecto? */
+  const knownProject = db.prepare('SELECT 1 AS ok FROM projects WHERE id = ?')
 
-      const statement = db.prepare(
-        `INSERT INTO user_projects (login, project_id, status, updated_at)
+  function isKnownProject(projectId: number): boolean {
+    return knownProject.get(projectId) !== undefined
+  }
+
+  const replaceForUser = db.transaction((login: string, entries: readonly ApiProjectUser[]) => {
+    db.prepare('DELETE FROM user_projects WHERE login = ?').run(login)
+
+    const statement = db.prepare(
+      `INSERT INTO user_projects (login, project_id, status, updated_at)
          VALUES (@login, @project_id, @status, @updated_at)
          ON CONFLICT (login, project_id) DO UPDATE SET
            status     = excluded.status,
            updated_at = excluded.updated_at`,
-      )
+    )
 
-      const updatedAt = nowIso()
-      for (const entry of entries) {
-        const status = normalizeStatus(entry.status)
-        const projectId = entry.project?.id
-        // Sin id de proyecto o con un estado que no modelamos, la fila no sirve.
-        if (status === null || projectId === undefined) {
-          continue
-        }
-        statement.run({ login, project_id: projectId, status, updated_at: updatedAt })
+    const updatedAt = nowIso()
+    for (const entry of entries) {
+      const status = normalizeStatus(entry.status)
+      const projectId = entry.project?.id
+      // Sin id de proyecto o con un estado que no modelamos, la fila no sirve.
+      if (status === null || projectId === undefined) {
+        continue
       }
-    },
-  )
+      // `user_projects` tiene clave foránea contra `projects`. Si el catálogo
+      // no conoce este id, se salta SOLO esta entrada. Dejar que reviente la
+      // clave abortaría la transacción y perderíamos también los proyectos
+      // buenos de esa persona. Un proyecto archivado no sale en `/projects`
+      // y eso es justo lo que pasa con la gentecuyo ya lo aprobó hace años.
+      if (!isKnownProject(projectId)) {
+        continue
+      }
+      statement.run({ login, project_id: projectId, status, updated_at: updatedAt })
+    }
+  })
+
+  /**
+   * Registra a alguien como participante de un proyecto, sin tocar lo que ya
+   * se sepa de esa persona.
+   *
+   * `GET /projects/:id/users` no trae estado: solo dice que alguien pasó por
+   * el proyecto, sin decir si lo está haciendo o si ya lo aprobó. Por eso
+   * asumen `in_progress` y **no** se pisa una fila existente. Si `projects_users`
+   * ya dijo que esa persona lo tiene terminado, esa información es más fina y
+   * manda; esta llamada solo sirve para descubrir gente que aún no conhece-
+   * mos de nadie.
+   */
+  const addParticipants = db.transaction((projectId: number, logins: readonly string[]) => {
+    const statement = db.prepare(
+      `INSERT INTO user_projects (login, project_id, status, updated_at)
+         VALUES (@login, @project_id, 'in_progress', @updated_at)
+         ON CONFLICT (login, project_id) DO NOTHING`,
+    )
+
+    if (!isKnownProject(projectId)) {
+      return
+    }
+
+    const updatedAt = nowIso()
+
+    for (const login of logins) {
+      statement.run({ login, project_id: projectId, updated_at: updatedAt })
+    }
+  })
 
   return {
     /** Inserta o actualiza el catálogo de proyectos. */
@@ -100,6 +140,19 @@ export function createProjectsRepository(db: Db) {
     /** Reemplaza el estado de una persona en todos sus proyectos. */
     replaceForUser(login: string, entries: readonly ApiProjectUser[]): void {
       replaceForUser(login, entries)
+    },
+
+    /**
+     * Añade participantes de un proyecto sin sobrescribir estados conocidos.
+     *
+     * A diferencia de `replaceForUser`, no borra nada: esta llamada es
+     * incompleta y no debe borrar lo que ya sabemos.
+     */
+    addParticipants(projectId: number, logins: readonly string[]): void {
+      if (logins.length === 0) {
+        return
+      }
+      addParticipants(projectId, logins)
     },
 
     /**
@@ -160,8 +213,12 @@ export function createProjectsRepository(db: Db) {
     /** Comprueba que un proyecto existe en el catálogo. */
     exists(projectId: number): boolean {
       return (
-        db.prepare<unknown[], { total: number }>('SELECT COUNT(*) AS total FROM projects WHERE id = ?')
+        (db
+          .prepare<unknown[], { total: number }>(
+            'SELECT COUNT(*) AS total FROM projects WHERE id = ?',
+          )
           .get(projectId)?.total ?? 0) > 0
+      )
     },
 
     /** Nombre de un proyecto, o `undefined` si no lo conocemos. */

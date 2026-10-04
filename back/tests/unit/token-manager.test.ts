@@ -146,9 +146,7 @@ describe('TokenManager', () => {
     // Sin User-Agent la 42 responde 403 con el cuerpo vacío.
     expect(headers['User-Agent']).toBe('sanatorio-42-test/1.0')
 
-    expect(new URLSearchParams(fake.bodyOf(0) ?? '').get('grant_type')).toBe(
-      'client_credentials',
-    )
+    expect(new URLSearchParams(fake.bodyOf(0) ?? '').get('grant_type')).toBe('client_credentials')
   })
 
   it('falla si la respuesta no trae access_token', async () => {

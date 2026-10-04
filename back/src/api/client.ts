@@ -19,12 +19,7 @@
 
 import type { RateLimiter } from './rate-limiter.js'
 import { TokenManager } from './token-manager.js'
-import {
-  ApiError,
-  apiErrorFromNetwork,
-  apiErrorFromResponse,
-  endpointFromUrl,
-} from './errors.js'
+import { ApiError, apiErrorFromNetwork, apiErrorFromResponse, endpointFromUrl } from './errors.js'
 import type { ApiCampusLocation, ApiProjectUser, ApiUser } from '../domain/types.js'
 
 /** Configuración del cliente. */
@@ -111,6 +106,20 @@ export class FortyTwoClient {
    */
   async getMe(accessToken?: string): Promise<ApiUser> {
     return this.requestV2<ApiUser>('/me', { accessToken })
+  }
+
+  /**
+   * `GET /v2/projects`: el catálogo con id y nombre de cada proyecto.
+   *
+   * `projects_users` solo trae `project: { id }`, sin nombre, y el front
+   * necesita el nombre para pintar la lista. Sin este catálogo, la tabla
+   * `projects` quedaría vacía y las claves foráneas no dejarían guardar
+   * ninguna pertenencia.
+   */
+  async getProjectCatalog(): Promise<
+    readonly { id: number; name: string; slug?: string | null }[]
+  > {
+    return this.fetchAllPages<{ id: number; name: string; slug?: string | null }>('/projects')
   }
 
   /**
@@ -236,19 +245,18 @@ export class FortyTwoClient {
 
       // El bucle siempre devuelve o lanza; esto es solo para que el compilador
       // no se queje de una ruta de retorno imposible.
-      throw lastError ?? new ApiError('Petición fallida sin error', 0, {
-        endpoint,
-        code: 'network_error',
-      })
+      throw (
+        lastError ??
+        new ApiError('Petición fallida sin error', 0, {
+          endpoint,
+          code: 'network_error',
+        })
+      )
     })
   }
 
   /** Un intento de `fetch`, con timeout. */
-  private async attemptFetch<T>(
-    url: string,
-    token: string,
-    timeoutMs: number,
-  ): Promise<T> {
+  private async attemptFetch<T>(url: string, token: string, timeoutMs: number): Promise<T> {
     let response: Response
     try {
       response = await this.fetchImpl(url, {

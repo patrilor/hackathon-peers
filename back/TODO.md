@@ -44,17 +44,31 @@ Mapeo exacto a `docs/api.md`. Aquí no se habla de SQLite ni de la API de 42.
 - [x] Traducción de errores internos a errores del contrato.
 - [x] Tests de cada servicio con repositorios en memoria.
 
-## 4. Sincronizador `working`
+## 4. Sincronizador `finish`
 
-- [ ] Sincronización del campus (`locations`) con TTL de 60 s.
-- [ ] Sincronización de los proyectos de un usuario con TTL de 900 s.
-- [ ] Cache: bajo demanda si está caducado, fondo si no.
-- [ ] Checkpoints en `sync_state` para no re-gastar los 1200 req/h.
-- [ ] Que una caída de la API no rompa la lectura: se sirve lo cacheado.
-- [ ] `sync-once` CLI paraforzar una sincronización.
-- [ ] Tests con reloj falso y API simulada.
+Estrategia decidida por el presupuesto, no por las ganas de datos frescos:
+1200 req/h no dan para recorrer un campus entero.
 
-## 5. Autenticación OAuth `pending`
+- [x] Globales: catálogo de proyectos y ubicaciones del campus, 2 llamadas.
+- [x] Bajo demanda: proyectos de quien entra y participantes de los proyectos
+      que tiene en curso.
+- [x] Frescura con dos fuerzas, en vez de un TTL fijo:
+  - ubicaciones 10 min (la llamada tarda ~1 min, refrescarla antes es tonto),
+  - catálogo 6 h (cambia poquísimo),
+  - proyectos de la persona 5 min, participantes 2 min.
+  - `maxStalenessMs` aparte, para que un dato no se quede viejo para siempre.
+- [x] Checkpoints en `sync_state`. Solo se marcan si el paso terminó bien: un
+      fallo deja la marca vieja y la siguiente vuelta lo reintenta.
+- [x] Un 401 aborta la vuelta; un 500 se registra y se sigue con lo demás.
+- [x] Catálogo vacío o desconocido: no se acepta y no se pisa lo que hay.
+- [x] `npm run sync -- <login>` y `npm run sync -- --force`.
+- [x] Tests con reloj falso y doble de la API (26 tests).
+
+Bug encontrado por los tests y corregido: una pertenencia a un proyecto
+desconocido reventaba la transacción y se perdían **todos** los proyectos de
+esa persona. Ahora se salta solo esa entrada.
+
+## 5. Autenticación OAuth `working`
 
 - [ ] `GET /auth/login` → redirección a 42 con `state` anti-CSRF.
 - [ ] `GET /auth/callback` → canje del código, sesión y redirección al front.

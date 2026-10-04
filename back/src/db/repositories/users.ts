@@ -88,22 +88,20 @@ export function createUsersRepository(db: Db) {
 
     /** Devuelve una persona por su login, o `undefined` si no la conocemos. */
     findByLogin(login: string): UserRow | undefined {
-      return db
-        .prepare<unknown[], UserRow>('SELECT * FROM users WHERE login = ?')
-        .get(login)
+      return db.prepare<unknown[], UserRow>('SELECT * FROM users WHERE login = ?').get(login)
     },
 
     /** Devuelve una persona por su id numérico de la API. */
     findById(userId: number): UserRow | undefined {
-      return db
-        .prepare<unknown[], UserRow>('SELECT * FROM users WHERE user_id = ?')
-        .get(userId)
+      return db.prepare<unknown[], UserRow>('SELECT * FROM users WHERE user_id = ?').get(userId)
     },
 
     /** Número de personas guardadas. Útil en tests y para logs de diagnóstico. */
     count(): number {
-      return db.prepare<unknown[], { total: number }>('SELECT COUNT(*) AS total FROM users').get()
-        ?.total ?? 0
+      return (
+        db.prepare<unknown[], { total: number }>('SELECT COUNT(*) AS total FROM users').get()
+          ?.total ?? 0
+      )
     },
   }
 }

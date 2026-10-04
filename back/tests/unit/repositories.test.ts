@@ -59,7 +59,13 @@ describe('normalizeStatus', () => {
 
   it('descarta el resto de estados de la API', () => {
     // Si estos se colaran, el front recibiría un status que no sabe pintar.
-    for (const status of ['waiting_to_be_started', 'upcoming', 'started', 'trashed', 'lo_que_sea']) {
+    for (const status of [
+      'waiting_to_be_started',
+      'upcoming',
+      'started',
+      'trashed',
+      'lo_que_sea',
+    ]) {
       expect(normalizeStatus(status)).toBeNull()
     }
   })
@@ -222,9 +228,7 @@ describe('repositorio de proyectos y peers', () => {
     ])
 
     // /me/projects pregunta "en qué estoy ahora", no "qué he aprobado nunca".
-    expect(projects.findInProgressByUser('albrodri')).toEqual([
-      { id: PISCINA, name: 'Piscina' },
-    ])
+    expect(projects.findInProgressByUser('albrodri')).toEqual([{ id: PISCINA, name: 'Piscina' }])
   })
 
   it('trae a los participantes del proyecto con los cuatro campos del contrato', () => {
@@ -238,7 +242,13 @@ describe('repositorio de proyectos y peers', () => {
     ])
 
     for (const peer of peers) {
-      expect(Object.keys(peer).sort()).toEqual(['available', 'image', 'location', 'login', 'status'])
+      expect(Object.keys(peer).sort()).toEqual([
+        'available',
+        'image',
+        'location',
+        'login',
+        'status',
+      ])
       expect(typeof peer.available).toBe('boolean')
     }
   })

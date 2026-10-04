@@ -31,13 +31,13 @@ const envSchema = z.object({
    * un servidor simulado en los tests de integración, y no tener que recompilar
    * si algún día la 42 mueve la API de sitio.
    */
-  FORTY_TWO_API_BASE: z.url('FORTY_TWO_API_BASE debe ser una URL válida').default(
-    'https://api.intra.42.fr',
-  ),
+  FORTY_TWO_API_BASE: z
+    .url('FORTY_TWO_API_BASE debe ser una URL válida')
+    .default('https://api.intra.42.fr'),
   /** Dónde se pide el token. Normalmente `${FORTY_TWO_API_BASE}/oauth/token`. */
-  FORTY_TWO_TOKEN_URL: z.url('FORTY_TWO_TOKEN_URL debe ser una URL válida').default(
-    'https://api.intra.42.fr/oauth/token',
-  ),
+  FORTY_TWO_TOKEN_URL: z
+    .url('FORTY_TWO_TOKEN_URL debe ser una URL válida')
+    .default('https://api.intra.42.fr/oauth/token'),
   /**
    * `User-Agent` obligatorio.
    *
@@ -45,9 +45,10 @@ const envSchema = z.object({
    * el cuerpo viene vacío, así que el error es muy difícil de diagnosticar si
    * no se sabe esto. La 42 pide un identificador propio en sus docs.
    */
-  FORTY_TWO_USER_AGENT: z.string().min(1, 'FORTY_TWO_USER_AGENT es obligatoria').default(
-    'sanatorio-42-backend/1.0 (+https://github.com/patrilor/hackathon-peers)',
-  ),
+  FORTY_TWO_USER_AGENT: z
+    .string()
+    .min(1, 'FORTY_TWO_USER_AGENT es obligatoria')
+    .default('sanatorio-42-backend/1.0 (+https://github.com/patrilor/hackathon-peers)'),
 
   // --- Servidor -----------------------------------------------------------
   /** Puerto donde escucha el backend. */

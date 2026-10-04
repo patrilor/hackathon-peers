@@ -175,9 +175,7 @@ describe('servicios de dominio', () => {
 
       expect(todos).toContain('albrodri')
 
-      const sinYo = services.projects
-        .findPeers(10, 'albrodri')
-        .map((peer) => peer.login)
+      const sinYo = services.projects.findPeers(10, 'albrodri').map((peer) => peer.login)
 
       expect(sinYo).toContain('jdoe')
       expect(sinYo).toContain('otro')

@@ -40,9 +40,7 @@ export function createAvailabilityRepository(db: Db) {
      */
     get(login: string): boolean {
       const row = db
-        .prepare<unknown[], AvailabilityRow>(
-          'SELECT available FROM availability WHERE login = ?',
-        )
+        .prepare<unknown[], AvailabilityRow>('SELECT available FROM availability WHERE login = ?')
         .get(login)
       return row?.available === 1
     },
