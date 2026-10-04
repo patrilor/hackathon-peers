@@ -500,19 +500,30 @@ elige la que corresponda al entorno.
 > contraseña y el error salta después. Por eso el backend no lleva el scope
 > hardcodeado, y lo toma de `FORTY_TWO_SCOPES`.
 
-**Estado verificado en la API** (con token de Client Credentials de la app `78735`):
+**Estado verificado contra la API** (con token de Client Credentials de la app
+`78735`, usando el `RateLimiter` del propio proyecto):
 
-| Comprobación | Resultado |
+| Endpoint | Resultado |
 |---|---|
 | `POST /oauth/token` con `client_credentials` | `200`, token correcto |
 | `GET /oauth/token/info` | `200`, `"scopes": ["public"]` (esperable en Client Credentials) |
-| `GET /v2/me` con token de app | `404 {}` — esperado: no hay `resource_owner_id` |
+| `GET /v2/users/:login` | `200`, con todos los campos |
+| `GET /v2/projects` | `200`, **1 702** proyectos |
+| `GET /v2/users/:login/projects_users` | `200`. Funciona con `public`: **no hace falta `profile` ni `projects`** |
+| `GET /v2/users/:login/locations` | `200`. Por usuario: 0–406 filas según el usuario |
+| `GET /v2/me` con token de app | `404 {}` — esperado, no hay `resource_owner_id` |
 
-Lo que **no** se pudo comprobar, por agotar la cuota horaria (1200/h): que
-`/v2/campus/22`, `/v2/projects`, `/v2/users/:login/projects_users` y
-`/v2/users/:login/locations` respondan bien. Queda pendiente repetirlas con la
-cuota fresca y **usando el `RateLimiter` del propio proyecto**, que es justamente
-lo que evita quemarse la cuota.
+> ✅ Corregido con la verificación: `projects_users` (la función de "compañeros")
+> funciona con el scope `public` de la app. El scope de identidad solo hace falta
+> para `/v2/me`, y eso ya lo pedía el login con token de usuario.
+
+> 🚨 **`/v2/campus/22/locations` no se puede paginar.** Devuelve
+> `X-Total: 751 077`, o sea **7 511 páginas** de 100. A 550 ms por petición son
+> unas 69 minutos, y contra la cuota de 1200/h el limitador acabaría bloqueando
+> más de una hora y el sincronizador **nunca terminaría**. No es que sea lento: es
+> que el endpoint devuelve el *histórico* de ubicaciones del campus, no solo las
+> de ahora. La alternativa correcta es `/v2/users/:login/locations`, que es una
+> petición por usuario y viene con `end_at: null` en la ubicación vigente.
 
 ### 3.2 Mapa de scopes
 
