@@ -24,6 +24,31 @@ const envSchema = z.object({
   /** Client Secret de la aplicación OAuth. Es una credencial real: nunca al log. */
   FORTY_TWO_SECRET: z.string().min(1, 'FORTY_TWO_SECRET no puede estar vacía'),
 
+  /**
+   * Raíz de la API de 42.
+   *
+   * Se declara aquí, y no fija en el código, por dos razones: poder apuntar a
+   * un servidor simulado en los tests de integración, y no tener que recompilar
+   * si algún día la 42 mueve la API de sitio.
+   */
+  FORTY_TWO_API_BASE: z.url('FORTY_TWO_API_BASE debe ser una URL válida').default(
+    'https://api.intra.42.fr',
+  ),
+  /** Dónde se pide el token. Normalmente `${FORTY_TWO_API_BASE}/oauth/token`. */
+  FORTY_TWO_TOKEN_URL: z.url('FORTY_TWO_TOKEN_URL debe ser una URL válida').default(
+    'https://api.intra.42.fr/oauth/token',
+  ),
+  /**
+   * `User-Agent` obligatorio.
+   *
+   * La API de 42 responde `403 Forbidden` a las peticiones sin `User-Agent`, y
+   * el cuerpo viene vacío, así que el error es muy difícil de diagnosticar si
+   * no se sabe esto. La 42 pide un identificador propio en sus docs.
+   */
+  FORTY_TWO_USER_AGENT: z.string().min(1, 'FORTY_TWO_USER_AGENT es obligatoria').default(
+    'sanatorio-42-backend/1.0 (+https://github.com/patrilor/hackathon-peers)',
+  ),
+
   // --- Servidor -----------------------------------------------------------
   /** Puerto donde escucha el backend. */
   PORT: z.coerce.number().int().positive().default(3000),
@@ -94,10 +119,14 @@ const envSchema = z.object({
   SYNC_REQUESTS_PER_MINUTE: z.coerce.number().int().positive().default(100),
 })
 
-/** Configuración normalizada: el entorno validado más los orígenes ya parseados. */
+/** Configuración normalizada: el entorno validado más lo derivado de él. */
 export type Env = z.infer<typeof envSchema> & {
   /** Orígenes del front permitidos en CORS, sin barra final. */
   readonly allowedOrigins: readonly string[]
+  /** Raíz de la API v2 de 42, con barra final. */
+  readonly apiV2Base: string
+  /** Origen del callback de OAuth, para poder verificar que no es de Vercel. */
+  readonly oauthRedirectOrigin: string
 }
 
 /**
@@ -126,9 +155,13 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     throw new Error('FRONTEND_ORIGINS no contiene ningún origen válido.')
   }
 
+  const apiBase = parsed.FORTY_TWO_API_BASE.replace(/\/$/, '')
+
   return Object.freeze({
     ...parsed,
     allowedOrigins: Object.freeze(origins),
+    apiV2Base: `${apiBase}/v2`,
+    oauthRedirectOrigin: new URL(parsed.FORTY_TWO_REDIRECT_URI).origin,
   })
 }
 

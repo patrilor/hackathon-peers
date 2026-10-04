@@ -8,9 +8,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch --env-file=.env src/server.ts",
     "build": "tsc --build tsconfig.build.json",
-    "start": "node dist/server.js",
+    "start": "node --env-file=.env dist/server.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -19,7 +19,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "sync": "tsx src/cli/sync-once.ts"
+    "sync": "tsx --env-file=.env src/cli/sync-once.ts",
+    "db:migrate": "tsx --env-file=.env src/cli/migrate.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

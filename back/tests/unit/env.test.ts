@@ -101,3 +101,53 @@ describe('orígenes permitidos para CORS', () => {
     expect(Object.isFrozen(env)).toBe(true)
   })
 })
+describe('configuración de la API de 42', () => {
+  it('deriva la raíz de la API v2 con barra final', () => {
+    // La barra importa: si falta, las URLs quedan `https://api.intra.42.frv2/me`.
+    const env = loadEnv({ ...validEnv(), FORTY_TWO_API_BASE: 'https://api.intra.42.fr/' })
+    expect(env.apiV2Base).toBe('https://api.intra.42.fr/v2')
+  })
+
+  it('acepta una base de API alternativa para los tests', () => {
+    const env = loadEnv({
+      ...validEnv(),
+      FORTY_TWO_API_BASE: 'http://127.0.0.1:4010',
+      FORTY_TWO_TOKEN_URL: 'http://127.0.0.1:4010/oauth/token',
+    })
+
+    expect(env.apiV2Base).toBe('http://127.0.0.1:4010/v2')
+  })
+
+  it('pone un User-Agent por defecto, porque la API devuelve 403 sin él', () => {
+    const env = loadEnv(validEnv())
+
+    expect(env.FORTY_TWO_USER_AGENT).toContain('sanatorio-42')
+  })
+
+  it('permite sobreescribir el User-Agent', () => {
+    const env = loadEnv({ ...validEnv(), FORTY_TWO_USER_AGENT: 'mi-proxy/2.0' })
+
+    expect(env.FORTY_TWO_USER_AGENT).toBe('mi-proxy/2.0')
+  })
+
+  it('expone el origen del callback de OAuth', () => {
+    const env = loadEnv({
+      ...validEnv(),
+      FORTY_TWO_REDIRECT_URI: 'https://api.sanatorio.example/auth/callback',
+    })
+
+    expect(env.oauthRedirectOrigin).toBe('https://api.sanatorio.example')
+  })
+
+  it('detecta si el callback apunta al front en vez de al backend', () => {
+    // El error clásico: registrar la URL de Vercel como callback. El código
+    // llega al front, que no tiene esa ruta, y el login falla en silencio.
+    const front = loadEnv({
+      ...validEnv(),
+      FORTY_TWO_REDIRECT_URI: 'https://sanatorio-42.vercel.app/auth/callback',
+    })
+
+    expect(front.oauthRedirectOrigin).toBe('https://sanatorio-42.vercel.app')
+    expect(front.oauthRedirectOrigin).not.toBe(front.allowedOrigins[0])
+  })
+})
