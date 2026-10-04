@@ -20,20 +20,20 @@ Hoy la aplicación **no arrancaría**: faltan `FRONTEND_ORIGINS`,
 - [x] Generar `SESSION_SECRET` y completar las variables que faltan en `.env`.
 - [x] Tests de que el esquema acepta y rechaza lo que debe.
 
-## 2. Cliente de la API de 42 `working`
+## 2. Cliente de la API de 42 `finish`
 
-- [ ] Errores tipados (`ApiError` con status, endpoint y si es reintentable).
-- [ ] Caché de token de Client Credentials con margen de refresco y
+- [x] Errores tipados (`ApiError` con status, endpoint y si es reintentable).
+- [x] Caché de token de Client Credentials con margen de refresco y
       *single-flight* para no pedir diez tokens a la vez.
-- [ ] Rate limiter: mínimo de 550 ms entre llamadas y tope por minuto.
-- [ ] Reintentos con backoff exponencial, respetando la cabecera `Retry-After`.
-- [ ] Timeouts diferenciados: 30 s normal, 120 s para `locations`.
-- [ ] Paginación de `users`, `projects_users` y `locations`.
-- [ ] Endpoints tipados: `/v2/me`, `/users/:login/projects_users`,
+- [x] Rate limiter: mínimo de 550 ms entre llamadas y tope por minuto.
+- [x] Reintentos con backoff exponencial, respetando la cabecera `Retry-After`.
+- [x] Timeouts diferenciados: 30 s normal, 120 s para `locations`.
+- [x] Paginación de `users`, `projects_users` y `locations`.
+- [x] Endpoints tipados: `/v2/me`, `/users/:login/projects_users`,
       `/projects/:id/users`, `/campus/:id/locations`, `/campus/:id/users`.
-- [ ] Tests con `fetch` simulado: caché de token, 429, reintentos, timeout, paginación.
+- [x] Tests con `fetch` simulado: caché de token, 429, reintentos, timeout, paginación.
 
-## 3. Servicios de dominio `pending`
+## 3. Servicios de dominio `working`
 
 Mapeo exacto a `docs/api.md`. Aquí no se habla de SQLite ni de la API de 42.
 

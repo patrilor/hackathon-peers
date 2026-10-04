@@ -46,9 +46,16 @@ export default defineConfig(
     },
   },
   {
-    // Los tests sí pueden ignorar promesas y usar console para depurar.
+    /**
+     * Relajas solo para los tests, y por razones concretas:
+     * - `require-await`: un doble de `sleep` tiene que devolver una promesa, pero
+     *   no hay nada que esperar dentro.
+     * - `no-floating-promises`: los tests disparan llamadas en paralelo a
+     *   propósito, para probar la serialización del limitador.
+     */
     files: ['tests/**/*.ts'],
     rules: {
+      '@typescript-eslint/require-await': 'off',
       '@typescript-eslint/no-floating-promises': 'off',
       '@typescript-eslint/no-unsafe-assignment': 'off',
       'no-console': 'off',
