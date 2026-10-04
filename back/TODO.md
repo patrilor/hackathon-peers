@@ -33,18 +33,18 @@ Hoy la aplicación **no arrancaría**: faltan `FRONTEND_ORIGINS`,
       `/projects/:id/users`, `/campus/:id/locations`, `/campus/:id/users`.
 - [x] Tests con `fetch` simulado: caché de token, 429, reintentos, timeout, paginación.
 
-## 3. Servicios de dominio `working`
+## 3. Servicios de dominio `finish`
 
 Mapeo exacto a `docs/api.md`. Aquí no se habla de SQLite ni de la API de 42.
 
-- [ ] `getMyProjects(login)` → solo los proyectos en curso.
-- [ ] `getPeers(projectId)` → participantes con `location` y `available`.
-- [ ] `setMyAvailability(login, available)`.
-- [ ] `getCurrentUser(login)` → `{ login, image }`.
-- [ ] Traducción de errores internos a errores del contrato.
-- [ ] Tests de cada servicio con repositorios en memoria.
+- [x] `getMyProjects(login)` → solo los proyectos en curso.
+- [x] `getPeers(projectId)` → participantes con `location` y `available`.
+- [x] `setMyAvailability(login, available)`.
+- [x] `getCurrentUser(login)` → `{ login, image }`.
+- [x] Traducción de errores internos a errores del contrato.
+- [x] Tests de cada servicio con repositorios en memoria.
 
-## 4. Sincronizador `pending`
+## 4. Sincronizador `working`
 
 - [ ] Sincronización del campus (`locations`) con TTL de 60 s.
 - [ ] Sincronización de los proyectos de un usuario con TTL de 900 s.
