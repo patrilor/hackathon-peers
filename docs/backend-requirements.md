@@ -68,3 +68,26 @@ Sin esto, el login parecerá funcionar pero `/auth/me` devolverá siempre 401.
    - Al elegir un proyecto se ven compañeros con foto, puesto y estado, y los especialistas destacados.
    - El interruptor "De guardia" se mantiene al recargar la página.
    - "Salir" vuelve al login.
+## Despliegue
+
+**Decidido: Oracle Cloud Always Free + Caddy + UptimeRobot.**
+
+| Pieza | Qué aporta |
+|---|---|
+| Oracle Cloud Always Free | 4 ARM y 24 GB de RAM, gratis y sin tarjeta. |
+| Caddy | Reverse proxy con TLS automático, sin-renewar certificados a mano. |
+| UptimeRobot | Avisa si `/health` deja de responder. |
+
+Se descartó Fly.io y Render porque el plan gratuito se queda corto o duerme
+justo cuando hay demo. Google Cloud e2-micro es la alternativa si no hay cuenta
+en Oracle: más caro y más caro y con más de configurar.
+
+Lo que falta antes de poder cerrar el punto 9:
+
+1. Una IP o dominio público, para registrar `https://<dominio>/auth/callback` en el
+   panel de 42.
+2. El scope `user` aprobado en la app `78735`.
+3. Las mismas variables de entorno en el servidor, con el `.env` en modo `600`.
+
+El arranque en el servidor es el de siempre: `npm ci`, `npm run build`,
+`npm start`, y systemd o un `pm2` para que sobreviva a un reinicio.

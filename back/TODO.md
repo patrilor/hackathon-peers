@@ -24,7 +24,7 @@ Hoy la aplicación **no arrancaría**: faltan `FRONTEND_ORIGINS`,
 
 - [x] Errores tipados (`ApiError` con status, endpoint y si es reintentable).
 - [x] Caché de token de Client Credentials con margen de refresco y
-      *single-flight* para no pedir diez tokens a la vez.
+      _single-flight_ para no pedir diez tokens a la vez.
 - [x] Rate limiter: mínimo de 550 ms entre llamadas y tope por minuto.
 - [x] Reintentos con backoff exponencial, respetando la cabecera `Retry-After`.
 - [x] Timeouts diferenciados: 30 s normal, 120 s para `locations`.
@@ -117,11 +117,11 @@ Dos trampas que costaron una vuelta de tuerca, por si se repiten:
   los 550 ms reales, la suite tardaba 8 s; ahora tarda medio segundo. Los tests del
   limitador cubren el retraso de verdad con reloj falso.
 
-## 8. Documentación `pending`
+## 8. Documentación `finish`
 
-- [ ] `README.md` del back: arranque, scripts, variables, arquitectura.
-- [ ] Actualizar `API_42.md` con la configuración real de la app (scopes, redirect).
-- [ ] Dejar constancia del despliegue elegido (Oracle + Caddy + UptimeRobot).
+- [x] `README.md` del back: arranque, scripts, variables, arquitectura.
+- [x] Actualizar `API_42.md` con la configuración real de la app (scopes, redirect).
+- [x] Dejar constancia del despliegue elegido (Oracle + Caddy + UptimeRobot).
 
 ## 9. Despliegue `pending`
 

@@ -473,6 +473,30 @@ la página de tu aplicación en <https://profile.intra.42.fr/oauth/applications/
 **Consecuencia:** todo lo que este documento marca ✅ funciona hoy. Lo marcado 🔒
 requiere que añadas scopes en el panel de la aplicación.
 
+#### Configuración que necesita este backend
+
+Lo mínimo para que Sanatorio 42 funcione, y nada más:
+
+| Qué | Valor | Por qué |
+|---|---|---|
+| Scopes | `public` + **`user`** | `public` da campus, proyectos y ubicaciones. `user` es lo único que habilita `/v2/me`. |
+| `redirect_uri` de desarrollo | `http://localhost:3000/auth/callback` | Debe coincidir carácter a carácter, puerto incluido. |
+| `redirect_uri` de producción | `https://<dominio>/auth/callback` | Sin HTTPS público no hay login en la demo. |
+| `User-Agent` | obligatorio | La API responde `403` con el cuerpo vacío si falta. |
+
+Los dos `redirect_uri` pueden registrarse a la vez: el panel acepta varias y se
+elige la que corresponda al entorno.
+
+> ⚠️ **`user`, no `profile`.** El nombre del scope aparece en algunos tutoriales y
+> engaña: `profile` no es un scope válido en la API de 42. Si se manda, la
+> autorización falla y no queda claro por qué. Para la identidad del usuario el
+> scope es `user`.
+
+Estado a día de la investigación: **`user` sigue pendiente de aprobar.** Hasta que
+esté, el login con usuario real no se puede probar, y el backend responde con un
+`error=insufficient_scope` explicativo en lugar de romperse en silencio. Todo lo
+demás (catálogo, proyectos, ubicaciones) funciona con `public`.
+
 ### 3.2 Mapa de scopes
 
 | Scope | Cubre | Endpoints típicos |
