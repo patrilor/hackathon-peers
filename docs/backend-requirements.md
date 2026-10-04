@@ -78,9 +78,9 @@ Sin esto, el login parecerá funcionar pero `/auth/me` devolverá siempre 401.
 | Caddy | Reverse proxy con TLS automático, sin-renewar certificados a mano. |
 | UptimeRobot | Avisa si `/health` deja de responder. |
 
-Se descartó Fly.io y Render porque el plan gratuito se queda corto o duerme
+Se descartaron Fly.io y Render porque el plan gratuito se queda corto o duerme
 justo cuando hay demo. Google Cloud e2-micro es la alternativa si no hay cuenta
-en Oracle: más caro y más caro y con más de configurar.
+en Oracle: más caro y con más de configurar.
 
 Lo que falta antes de poder cerrar el punto 9:
 
