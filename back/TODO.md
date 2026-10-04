@@ -68,16 +68,25 @@ Bug encontrado por los tests y corregido: una pertenencia a un proyecto
 desconocido reventaba la transacción y se perdían **todos** los proyectos de
 esa persona. Ahora se salta solo esa entrada.
 
-## 5. Autenticación OAuth `working`
+## 5. Autenticación OAuth `finish`
 
-- [ ] `GET /auth/login` → redirección a 42 con `state` anti-CSRF.
-- [ ] `GET /auth/callback` → canje del código, sesión y redirección al front.
-- [ ] `GET /auth/me` → `{ login, image }`, `401` si no hay sesión.
-- [ ] `POST /auth/logout` → borra la cookie.
-- [ ] Cookie firmada con `SESSION_SECRET`, `httpOnly`, `sameSite=lax`, `secure`.
-- [ ] Tests del ciclo completo con el proveedor de 42 simulado.
+- [x] Authorization code flow con PKCE (S256). El verifier nunca va en la URL.
+- [x] `state` anti-CSRF en cookie firmada y compara en tiempo constante.
+- [x] Canje del código con Basic auth y `code_verifier`.
+- [x] Sesiones en SQLite (migración v2), no en la cookie: la cookie lleva un
+      identificador opaco y firmado, y el token de 42 no viaja en cada petición.
+- [x] La sesión nunca vive más que el token: `min(expires_in, 12 h)`.
+- [x] Logout que borra la fila, no solo la cookie.
+- [x] Sesiones caducadas borradas al leerlas y con purga explícita.
+- [x] Un 404 en `/v2/me` explica que falta aprobar el scope `user`, que es el
+      fallo más caro de diagnosticar porque la API responde `{}` y no dice nada.
+- [x] 26 tests del ciclo entero con proveedor de 42 simulado y reloj falso.
 
-## 6. Servidor Fastify `pending`
+PENDIENTE FUERA DEL CÓDIGO: el panel de la app `78735` sigue con `public` y
+`profile`. `profile` no existe en 42; tiene que ser `user`. Hasta que se
+apruebe, el login contra la API real no se puede probar.
+
+## 6. Servidor Fastify `working`
 
 - [ ] `buildApp()` que devuelva la instancia lista para tests.
 - [ ] CORS con credenciales y lista de orígenes, nunca comodín.

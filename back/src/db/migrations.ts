@@ -98,6 +98,26 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    version: 2,
+    name: 'sesiones',
+    statements: [
+      // --- Sesiones -------------------------------------------------------
+      // La cookie lleva un identificador opaco y firmado, no el token de 42.
+      // Dos razones: el token no viaja en cada petición, y el logout es de
+      // verdad un borrado, no un "confía en que el navegador tire la cookie".
+      `CREATE TABLE sessions (
+        session_id   TEXT PRIMARY KEY,
+        login        TEXT NOT NULL REFERENCES users (login) ON DELETE CASCADE,
+        access_token TEXT NOT NULL,
+        expires_at   INTEGER NOT NULL,
+        created_at   TEXT NOT NULL
+      )`,
+      // El índice es para la limpieza de sesiones caducadas, que va por
+      // `expires_at` y no por la clave primaria.
+      `CREATE INDEX idx_sessions_expires_at ON sessions (expires_at)`,
+    ],
+  },
 ]
 
 /** Versión más alta que existe en el código. */
