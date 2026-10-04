@@ -148,3 +148,36 @@ describe('configuración de la API de 42', () => {
     expect(front.oauthRedirectOrigin).not.toBe(front.allowedOrigins[0])
   })
 })
+
+describe('scopes de OAuth', () => {
+  it('por defecto pide public y profile', () => {
+    // El panel de la app 78735 llama `profile` al scope de datos de usuario.
+    // Si algún día lo renombran, se cambia en el .env y no en el código.
+    expect(loadEnv(validEnv()).oauthScopes).toEqual(['public', 'profile'])
+  })
+
+  it('acepta coma o espacios como separador', () => {
+    expect(loadEnv({ ...validEnv(), FORTY_TWO_SCOPES: 'public, profile' }).oauthScopes).toEqual([
+      'public',
+      'profile',
+    ])
+    expect(
+      loadEnv({ ...validEnv(), FORTY_TWO_SCOPES: '  public   profile  ' }).oauthScopes,
+    ).toEqual(['public', 'profile'])
+  })
+
+  it('quita los scopes en blanco', () => {
+    // Un espacio de más llega a la URL como `scope=public  profile`, y 42
+    // responde invalid_scope sin decir cuál sobra.
+    expect(loadEnv({ ...validEnv(), FORTY_TWO_SCOPES: 'public ,  profile' }).oauthScopes).toEqual([
+      'public',
+      'profile',
+    ])
+  })
+
+  it('deja cambiar los scopes sin tocar el código', () => {
+    const env = loadEnv({ ...validEnv(), FORTY_TWO_SCOPES: 'public profile projects' })
+
+    expect(env.oauthScopes).toEqual(['public', 'profile', 'projects'])
+  })
+})

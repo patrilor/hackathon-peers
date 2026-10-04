@@ -39,7 +39,7 @@ export type Recorded = {
 export type ProviderOptions = {
   /** Perfil que devuelve `/v2/me`. */
   profile?: unknown
-  /** Status de `/v2/me`. 404 simula el scope `user` sin aprobar. */
+  /** Status de `/v2/me`. 404 simula el scope de identidad sin aprobar. */
   profileStatus?: number
   /** Status de `/oauth/token`. */
   tokenStatus?: number
@@ -113,7 +113,7 @@ export function makeProvider(options: ProviderOptions = {}) {
           access_token: 'token-de-usuario',
           token_type: 'bearer',
           expires_in: 3600,
-          scope: 'user',
+          scope: 'public profile',
         }),
         { status: 200 },
       )

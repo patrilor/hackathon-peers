@@ -114,6 +114,7 @@ export function buildApp(options: BuildOptions = {}): BuiltApp {
     clientSecret: env.FORTY_TWO_SECRET,
     redirectUri: env.FORTY_TWO_REDIRECT_URI,
     userAgent: env.FORTY_TWO_USER_AGENT,
+    scopes: env.oauthScopes,
     fetchImpl,
   })
 

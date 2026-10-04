@@ -479,7 +479,7 @@ Lo mínimo para que Sanatorio 42 funcione, y nada más:
 
 | Qué | Valor | Por qué |
 |---|---|---|
-| Scopes | `public` + **`user`** | `public` da campus, proyectos y ubicaciones. `user` es lo único que habilita `/v2/me`. |
+| Scopes | `public` + **`profile`** | `public` da campus, proyectos y ubicaciones. `profile` es lo único que habilita `/v2/me`. |
 | `redirect_uri` de desarrollo | `http://localhost:3000/auth/callback` | Debe coincidir carácter a carácter, puerto incluido. |
 | `redirect_uri` de producción | `https://<dominio>/auth/callback` | Sin HTTPS público no hay login en la demo. |
 | `User-Agent` | obligatorio | La API responde `403` con el cuerpo vacío si falta. |
@@ -487,15 +487,32 @@ Lo mínimo para que Sanatorio 42 funcione, y nada más:
 Los dos `redirect_uri` pueden registrarse a la vez: el panel acepta varias y se
 elige la que corresponda al entorno.
 
-> ⚠️ **`user`, no `profile`.** El nombre del scope aparece en algunos tutoriales y
-> engaña: `profile` no es un scope válido en la API de 42. Si se manda, la
-> autorización falla y no queda claro por qué. Para la identidad del usuario el
-> scope es `user`.
+> ⚠️ **El nombre del scope solo lo confirma el panel de tu aplicación.** La tabla de
+> §3.2 de este documento es *orientativa* (lo avisa más abajo) y se equivocaba:
+> nombraba `user` para el scope de identidad, y en el panel de la app `78735` ese
+> scope se llama **`profile`** ("manage user data"). La referencia buena es la
+> página de tu propia aplicación, no este documento.
 
-Estado a día de la investigación: **`user` sigue pendiente de aprobar.** Hasta que
-esté, el login con usuario real no se puede probar, y el backend responde con un
-`error=insufficient_scope` explicativo en lugar de romperse en silencio. Todo lo
-demás (catálogo, proyectos, ubicaciones) funciona con `public`.
+> ⚠️ **`/oauth/authorize` no valida el scope hasta que el usuario se ha autenticado.**
+> Se comprobó: pedir `scope=user`, `scope=profile`, un scope inventado o incluso
+> `response_type=token` devuelve todos un `302` a `signin.intra.42.fr`. O sea que un
+> nombre equivocado **no** falla en la redirección: el usuario escribe su
+> contraseña y el error salta después. Por eso el backend no lleva el scope
+> hardcodeado, y lo toma de `FORTY_TWO_SCOPES`.
+
+**Estado verificado en la API** (con token de Client Credentials de la app `78735`):
+
+| Comprobación | Resultado |
+|---|---|
+| `POST /oauth/token` con `client_credentials` | `200`, token correcto |
+| `GET /oauth/token/info` | `200`, `"scopes": ["public"]` (esperable en Client Credentials) |
+| `GET /v2/me` con token de app | `404 {}` — esperado: no hay `resource_owner_id` |
+
+Lo que **no** se pudo comprobar, por agotar la cuota horaria (1200/h): que
+`/v2/campus/22`, `/v2/projects`, `/v2/users/:login/projects_users` y
+`/v2/users/:login/locations` respondan bien. Queda pendiente repetirlas con la
+cuota fresca y **usando el `RateLimiter` del propio proyecto**, que es justamente
+lo que evita quemarse la cuota.
 
 ### 3.2 Mapa de scopes
 

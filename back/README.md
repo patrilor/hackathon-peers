@@ -57,10 +57,26 @@ variable por variable. Las que de verdad importan:
 
 ### Scopes de la app OAuth
 
-La app `78735` tiene `public`, y hace falta **`user`** también: sin él,
-`/v2/me` devuelve `404` y no hay forma de saber quién está logueado. Pídelo en
-<https://profile.intra.42.fr/oauth/applications/78735> y anota en
-[`API_42.md`](./API_42.md) el día que se apruebe.
+La app `78735` tiene aprobado `public`, `projects`, `profile`, `elearning`, `tig` y
+`forum`. Sanatorio solo pide **`public profile`**: `public` para campus, proyectos
+y ubicaciones, y `profile` (que el panel llama "manage user data") es lo que
+habilita `/v2/me`. Los otros cuatro son de escritura de teams, media, comunidad y
+foro, y no se usan.
+
+El scope se toma de `FORTY_TWO_SCOPES`, no está en el código:
+
+```bash
+FORTY_TWO_SCOPES=public profile
+```
+
+Motivo: `/oauth/authorize` **no valida el scope hasta que el usuario se ha
+autenticado**. Se comprobó que pedir un scope inventado también devuelve un `302`
+al login, así que un nombre mal escrito no falla en la redirección: el usuario
+escribe su contraseña y el error salta después. Con la variable en el entorno,
+corregirlo es cambiar una línea del `.env` en vez de recompilar y redesplegar.
+
+El nombre del scope lo confirma el panel de tu aplicación, no la documentación
+interna. Ver [`API_42.md` §3.1](./API_42.md).
 
 ## API
 

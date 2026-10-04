@@ -40,8 +40,8 @@ type Recorded = { url: string; method: string; body: string; authorization: stri
  * Proveedor de 42 simulado.
  *
  * `profileStatus` sirve para reproducir el `404 {}` que devuelve la API cuando
- * el token no lleva el scope `user`, que es el fallo más probable de todo el
- * flujo y el más difícil de diagnosticar.
+ * el token no lleva un scope de identidad, que es el fallo más probable de todo
+ * el flujo y el más difícil de diagnosticar.
  */
 function makeProvider(
   overrides: {
@@ -77,7 +77,7 @@ function makeProvider(
           access_token: 'token-de-usuario',
           token_type: 'bearer',
           expires_in: 3600,
-          scope: 'user',
+          scope: 'public profile',
         }),
         { status: 200 },
       )
@@ -180,7 +180,42 @@ describe('cookies firmadas', () => {
 })
 
 describe('oauth client', () => {
-  it('pide el scope `user` y un `state`', () => {
+  it('usa los scopes que le pasan, para poder corregirlos sin desplegar', () => {
+    const { fetchImpl } = makeProvider()
+    const oauth = createOAuthClient({
+      authorizeUrl: 'https://api.test/oauth/authorize',
+      tokenUrl: 'https://api.test/oauth/token',
+      clientId: 'u-test',
+      clientSecret: 's-test',
+      redirectUri: 'https://back.test/auth/callback',
+      userAgent: 'test/1.0',
+      scopes: ['public', 'otro-scope'],
+      fetchImpl,
+    })
+
+    const url = new URL(oauth.authorizeUrl({ state: 'abc' }))
+
+    expect(url.searchParams.get('scope')).toBe('public otro-scope')
+  })
+
+  it('se niega a construir una autorización sin scopes', () => {
+    const { fetchImpl } = makeProvider()
+
+    expect(() =>
+      createOAuthClient({
+        authorizeUrl: 'https://api.test/oauth/authorize',
+        tokenUrl: 'https://api.test/oauth/token',
+        clientId: 'u-test',
+        clientSecret: 's-test',
+        redirectUri: 'https://back.test/auth/callback',
+        userAgent: 'test/1.0',
+        scopes: [],
+        fetchImpl,
+      }),
+    ).toThrow(/scope/)
+  })
+
+  it('pide los scopes de identidad y un `state`', () => {
     const { fetchImpl } = makeProvider()
     const oauth = createOAuthClient({
       authorizeUrl: 'https://api.test/oauth/authorize',
@@ -199,8 +234,8 @@ describe('oauth client', () => {
     expect(params.get('response_type')).toBe('code')
     expect(params.get('client_id')).toBe('u-test')
     expect(params.get('state')).toBe('abc')
-    // Sin scope la API concede solo `public` y `/v2/me` da 404.
-    expect(params.get('scope')).toBe('user')
+    // Sin scope de identidad la API concede solo `public` y `/v2/me` da 404.
+    expect(params.get('scope')).toBe('public profile')
     expect(params.get('redirect_uri')).toBe('https://back.test/auth/callback')
   })
 
@@ -368,12 +403,12 @@ describe('lo que debe fallar', () => {
     ).rejects.toMatchObject({ code: 'invalid_input' })
   })
 
-  it('explica que falta el scope `user` cuando la API da 404', async () => {
+  it('explica que falta un scope de identidad cuando la API da 404', async () => {
     const { auth } = makeAuth({ profileStatus: 404 })
 
     // Es el fallo que más cuesta diagnosticar: la API responde `404 {}` y no
     // dice que lo que falta es el scope aprobado en el panel.
-    await expect(login(auth)).rejects.toThrow(/scope `user`/)
+    await expect(login(auth)).rejects.toThrow(/scope de identidad/)
   })
 
   it('propaga un canje fallido', async () => {

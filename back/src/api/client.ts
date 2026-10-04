@@ -9,7 +9,7 @@
  *
  * | Endpoint                                | Particularidad                        |
  * |-----------------------------------------|---------------------------------------|
- * | `/v2/me`                                | Necesita token de **usuario** y scope `user`. Con token de app devuelve 404. |
+ * | `/v2/me`                                | Necesita token de **usuario** y scope de identidad (`profile`). Con token de app devuelve 404. |
  * | `/v2/users/:login/projects_users`       | Trae el estado por proyecto. No trae el nombre del proyecto. |
  * | `/v2/projects/:id/users`                | Participantes de todo el histórico. No trae estado. |
  * | `/v2/campus/:id/locations`              | Solo el campus. Tarda ~1 min: revienta con timeout de 30 s. |
@@ -98,7 +98,7 @@ export class FortyTwoClient {
   /**
    * `GET /v2/me`: el usuario del token.
    *
-   * Exige token de **usuario** y scope `user`. Con el token de la aplicación
+   * Exige token de **usuario** y scope de identidad (`profile`). Con el token de la aplicación
    * la API responde `404 {}`, no un 403, lo que desconcierta. Se deja el
    * parámetro para poder pasar un token de usuario cuando el flow OAuth esté.
    *

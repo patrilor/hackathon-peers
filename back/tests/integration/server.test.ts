@@ -59,7 +59,7 @@ describe('autenticación', () => {
     const location = new URL(String(response.headers.location))
     expect(location.pathname).toBe('/oauth/authorize')
     expect(location.searchParams.get('client_id')).toBe('u-test')
-    expect(location.searchParams.get('scope')).toBe('user')
+    expect(location.searchParams.get('scope')).toBe('public profile')
     expect(location.searchParams.get('state')).toBeTruthy()
     expect(cookieValue(response.headers['set-cookie'], '__Host-sanatorio_oauth_state')).toBeTruthy()
   })

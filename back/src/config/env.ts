@@ -68,6 +68,19 @@ const envSchema = z.object({
 
   // --- OAuth --------------------------------------------------------------
   /**
+   * Scopes que se piden en la URL de autorización, separados por espacios.
+   *
+   * El nombre exacto del scope de identidad **solo lo confirma el panel de la
+   * aplicación**: `/oauth/authorize` no lo valida hasta que el usuario ya se ha
+   * autenticado, así que un nombre mal escrito no falla aquí, falla después en el
+   * login. Por eso va en el entorno y no hardcodeado.
+   *
+   * `public` es el default de la API. `profile` es el scope de datos de usuario
+   * que aparece en el panel de la app 78735 ("manage user data"); sin él
+   * `/v2/me` responde `404 {}`.
+   */
+  FORTY_TWO_SCOPES: z.string().default('public profile'),
+  /**
    * Callback de OAuth. Debe estar registrada **carácter a carácter** en el panel
    * de la app de 42, o 42 no devolverá nunca el código.
    */
@@ -136,6 +149,8 @@ export type Env = z.infer<typeof envSchema> & {
   readonly apiV2Base: string
   /** Origen del callback de OAuth, para poder verificar que no es de Vercel. */
   readonly oauthRedirectOrigin: string
+  /** Scopes de OAuth ya troceados, sin entradas vacías. */
+  readonly oauthScopes: readonly string[]
 }
 
 /**
@@ -148,6 +163,20 @@ function parseOrigins(raw: string): string[] {
     .map((origin) => origin.trim())
     .filter(Boolean)
     .map((origin) => origin.replace(/\/$/, ''))
+}
+
+/**
+ * Trocea la lista de scopes de OAuth.
+ *
+ * Acepta coma o espacios, como los orígenes. Se quitan las entradas vacías
+ * porque un scope en blanco sí se cuela en la URL de autorización: llega un
+ * `scope` con espacios de más y 42 responde `invalid_scope` sin decir cuál sobra.
+ */
+function parseScopes(raw: string): string[] {
+  return raw
+    .split(/[,\s]+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean)
 }
 
 /**
@@ -171,6 +200,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     allowedOrigins: Object.freeze(origins),
     apiV2Base: `${apiBase}/v2`,
     oauthRedirectOrigin: new URL(parsed.FORTY_TWO_REDIRECT_URI).origin,
+    oauthScopes: Object.freeze(parseScopes(parsed.FORTY_TWO_SCOPES)),
   })
 }
 
