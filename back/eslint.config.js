@@ -1,4 +1,5 @@
 import js from '@eslint/js'
+import { defineConfig } from 'eslint/config'
 import tseslint from 'typescript-eslint'
 
 /**
@@ -9,7 +10,7 @@ import tseslint from 'typescript-eslint'
  * 3. Sin promesas sin await: un `await` forgotten es un bug silencioso.
  * 4. Nombres de variables consistentes.
  */
-export default tseslint.config(
+export default defineConfig(
   {
     ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'data/**'],
   },
@@ -19,7 +20,11 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        projectService: {
+          // `eslint.config.js` es JavaScript y no entra en ningún tsconfig, así
+          // que el servicio de proyectos de TS no lo encuentra sin esto.
+          allowDefaultProject: ['eslint.config.js'],
+        },
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -33,6 +38,9 @@ export default tseslint.config(
       '@typescript-eslint/require-await': 'error',
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/no-misused-promises': 'error',
+      // Interpolar un número en un mensaje de error es normal; lo que no se
+      // quiere es interpolar objetos o arrays por accidente.
+      '@typescript-eslint/restrict-template-expressions': ['error', { allowNumber: true }],
       'no-console': ['error', { allow: ['warn', 'error'] }],
       eqeqeq: ['error', 'always'],
     },

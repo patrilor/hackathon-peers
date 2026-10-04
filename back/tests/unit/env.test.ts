@@ -33,7 +33,8 @@ describe('loadEnv', () => {
 
   it.each(REQUIRED_ENV_VARS)('falla si falta %s', (variable) => {
     const source = validEnv()
-    delete source[variable]
+    // `Reflect.deleteProperty` en vez de `delete`: la clave es dinámica.
+    Reflect.deleteProperty(source, variable)
 
     expect(() => loadEnv(source)).toThrow()
   })

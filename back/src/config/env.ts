@@ -45,14 +45,14 @@ const envSchema = z.object({
    * Callback de OAuth. Debe estar registrada **carácter a carácter** en el panel
    * de la app de 42, o 42 no devolverá nunca el código.
    */
-  FORTY_TWO_REDIRECT_URI: z.string().url('FORTY_TWO_REDIRECT_URI debe ser una URL válida'),
+  FORTY_TWO_REDIRECT_URI: z.url('FORTY_TWO_REDIRECT_URI debe ser una URL válida'),
   /**
    * Clave para firmar las cookies de sesión. Sin ella, cualquier persona podría
    * fabricar su propia cookie y hacerse pasar por otra.
    */
   SESSION_SECRET: z.string().min(16, 'SESSION_SECRET debe tener al menos 16 caracteres'),
   /** A dónde vuelve el usuario tras el login. Normalmente el front. */
-  FRONTEND_URL: z.string().url('FRONTEND_URL debe ser una URL válida'),
+  FRONTEND_URL: z.url('FRONTEND_URL debe ser una URL válida'),
 
   // --- Base de datos ------------------------------------------------------
   /** Ruta del fichero SQLite. `:memory:` para tests. */
