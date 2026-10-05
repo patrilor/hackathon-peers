@@ -32,7 +32,6 @@ function makeClient(
     apiV2Base: 'https://api.test/v2',
     userAgent: 'sanatorio-42-test/1.0',
     timeoutMs: 1_000,
-    heavyTimeoutMs: 2_000,
     pageSize: overrides.pageSize ?? 100,
     limiter: instantRateLimiter(),
     tokens: fakeTokenManager(),
@@ -204,7 +203,6 @@ describe('reintentos', () => {
       apiV2Base: 'https://api.test/v2',
       userAgent: 'test/1.0',
       timeoutMs: 1_000,
-      heavyTimeoutMs: 1_000,
       pageSize: 100,
       limiter: instantRateLimiter(),
       tokens,
@@ -348,7 +346,6 @@ describe('timeouts', () => {
       userAgent: 'test/1.0',
       timeoutMs: 30_000,
       // Este endpoint se acerca al minuto: con 30 s revienta.
-      heavyTimeoutMs: 120_000,
       pageSize: 100,
       limiter: instantRateLimiter(),
       tokens: fakeTokenManager(),
@@ -357,7 +354,7 @@ describe('timeouts', () => {
       sleep: async () => undefined,
     })
 
-    await client.getCampusLocations(22)
+    await client.getCampusUsers(22)
 
     // `AbortSignal.timeout` no expone el valor, pero sí la presencia de la señal.
     expect(signals[0]).toBeInstanceOf(AbortSignal)
@@ -375,7 +372,6 @@ describe('timeouts', () => {
       apiV2Base: 'https://api.test/v2',
       userAgent: 'test/1.0',
       timeoutMs: 1_000,
-      heavyTimeoutMs: 1_000,
       pageSize: 100,
       limiter: instantRateLimiter(),
       tokens: fakeTokenManager(),

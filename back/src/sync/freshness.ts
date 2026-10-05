@@ -22,11 +22,6 @@ export const HOUR = 60 * MINUTE
 
 export const FRESHNESS = {
   /**
-   * Puestos del campus. La llamada tarda cerca de un minuto, así que el
-   * margen de frescura tiene que ser holgado o se pasa el rato refrescando.
-   */
-  campusLocations: { minAgeMs: 10 * MINUTE, maxStalenessMs: 30 * MINUTE },
-  /**
    * El catálogo cambia muy pocas veces. Casi nunca hay que pedirlo.
    */
   projectsCatalog: { minAgeMs: 6 * HOUR, maxStalenessMs: 24 * HOUR },

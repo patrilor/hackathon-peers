@@ -13,8 +13,6 @@ import { DomainError } from '../../src/domain/errors.js'
 import type { ApiProjectUser } from '../../src/domain/types.js'
 import { createServices } from '../../src/services/container.js'
 
-const CAMPUS_ID = 22
-
 /**
  * Monta una base limpia con los servicios encima.
  *
@@ -23,7 +21,7 @@ const CAMPUS_ID = 22
  */
 function makeServices() {
   const db = openDatabase(':memory:')
-  return { ...createServices(db, CAMPUS_ID) }
+  return { ...createServices(db) }
 }
 
 /** Persona replicada. Sin esto, las claves foráneas bloquean el resto. */

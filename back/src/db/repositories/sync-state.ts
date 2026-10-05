@@ -14,8 +14,6 @@ import { nowIso } from '../database.js'
 
 /** Claves de checkpoint que el sincronizador usa. */
 export const SYNC_KEYS = {
-  /** Última vez que se sincronizó la lista del campus. */
-  CAMPUS_LOCATIONS: 'campus_locations_synced_at',
   /** Última vez que se sincronizaron los proyectos de un usuario. */
   USER_PROJECTS: 'user_projects_synced_at',
   /** Login por el que va la sincronización, para poder reanudar. */

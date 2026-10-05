@@ -48,21 +48,15 @@ async function main(): Promise<void> {
   const force = wantsForce(argv)
 
   const db = openDatabase(env.DATABASE_PATH)
-  const services = createServices(db, env.CAMPUS_ID)
+  const services = createServices(db)
   const client = createApiClient(env)
-  const synchronizer = createSynchronizer({
-    services,
-    client,
-    campusId: env.CAMPUS_ID,
-  })
+  const synchronizer = createSynchronizer({ services, client })
 
   if (force) {
     // Sin esto, los checkpoints frescos hacen que el comando no haga nada, que
     // es justo lo contrario de lo que se espera de un `sync --force`.
-    for (const key of ['sync:projects:catalog', `sync:campus:${env.CAMPUS_ID}:locations`]) {
-      services.repositories.syncState.delete(key)
-    }
-    process.stdout.write('checkpoints globales borrados\n')
+    services.repositories.syncState.delete('sync:projects:catalog')
+    process.stdout.write('checkpoint global borrado\n')
   }
 
   const results =

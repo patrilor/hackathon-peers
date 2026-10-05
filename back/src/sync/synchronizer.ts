@@ -25,7 +25,6 @@ import { syncKeys } from './checkpoints.js'
 /** Lo que el sincronizador necesita de la API de 42. */
 export type SyncClient = Pick<
   FortyTwoClient,
-  | 'getCampusLocations'
   | 'getProjectCatalog'
   | 'getProjectParticipants'
   | 'getUser'
@@ -35,13 +34,12 @@ export type SyncClient = Pick<
 export type SynchronizerOptions = {
   services: Services
   client: SyncClient
-  campusId: number
   now?: () => number
   log?: (message: string) => void
 }
 
 export function createSynchronizer(options: SynchronizerOptions) {
-  const { services, client, campusId } = options
+  const { services, client } = options
   const now = options.now ?? Date.now
   const log = options.log ?? defaultLog
 
@@ -111,25 +109,11 @@ export function createSynchronizer(options: SynchronizerOptions) {
       },
     )
 
-    const locations = await step(
-      'campus_locations',
-      syncKeys.campusLocations(campusId),
-      FRESHNESS.campusLocations,
-      async () => {
-        const locations = await client.getCampusLocations(campusId)
-
-        // Las ubicaciones traen el usuario embebido, así que de paso quedan
-        // replicadas las personas que están en el campus.
-        // Todas las ubicaciones traen usuario embebido; el filtro solo protege
-        // frente a un elemento raro que viniera sin él.
-        services.repositories.users.upsertMany(locations.map((entry) => toUserInput(entry.user)))
-        services.repositories.locations.replaceSnapshot(campusId, locations)
-
-        return locations.length
-      },
-    )
-
-    return [catalog, locations]
+    // Las ubicaciones masivas del campus se descartan: `/campus/:id/locations`
+    // devuelve el histórico completo (7 511 páginas en Madrid), lo que hace
+    // inviable sincronizarlo dentro de la cuota. La ubicación actual se lee
+    // directamente del objeto de usuario cuando aparece (participantes, /users/:login).
+    return [catalog]
   }
 
   /**

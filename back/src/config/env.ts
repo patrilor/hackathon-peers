@@ -98,8 +98,6 @@ const envSchema = z.object({
   DATABASE_PATH: z.string().default('data/sanatorio.db'),
 
   // --- Campus -------------------------------------------------------------
-  /** Id del campus en la API de 42. Madrid = 22. */
-  CAMPUS_ID: z.coerce.number().int().positive().default(22),
   /** Id del cursus. Common Core = 21. */
   CURSUS_ID: z.coerce.number().int().positive().default(21),
 
@@ -113,17 +111,6 @@ const envSchema = z.object({
   API_REQUEST_DELAY_SECONDS: z.coerce.number().positive().default(0.55),
   /** Timeout de las peticiones normales. */
   API_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
-  /**
-   * Timeout de `/campus/:id/locations`, que con Madrid se acerca al minuto.
-   * Verificado: revienta a los 30 s y responde bien a los 120 s.
-   */
-  API_TIMEOUT_HEAVY_MS: z.coerce.number().int().positive().default(120_000),
-  /**
-   * Cuánto tiempo se considera frescos los datos antes de volver a pedir a la API.
-   * Las ubicaciones caducan rápido; los proyectos, no.
-   */
-  CACHE_TTL_CAMPUS_SECONDS: z.coerce.number().int().positive().default(60),
-  CACHE_TTL_PROJECTS_SECONDS: z.coerce.number().int().positive().default(900),
   /** Peticiones por página a la API. El máximo de 42 es 100. */
   PAGE_SIZE: z.coerce.number().int().positive().max(100).default(100),
   /**

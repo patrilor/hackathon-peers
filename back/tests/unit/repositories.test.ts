@@ -6,41 +6,27 @@
  * peers equivocados, y no hay forma de que alguien se entere.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { openDatabase, type Db } from '../../src/db/database.js'
-import { createUsersRepository } from '../../src/db/repositories/users.js'
-import { createLocationsRepository } from '../../src/db/repositories/locations.js'
+import { createUsersRepository, toUserInput } from '../../src/db/repositories/users.js'
 import { createProjectsRepository, normalizeStatus } from '../../src/db/repositories/projects.js'
 import { createAvailabilityRepository } from '../../src/db/repositories/availability.js'
 import { createSyncStateRepository, SYNC_KEYS } from '../../src/db/repositories/sync-state.js'
-import type { ApiCampusLocation } from '../../src/domain/types.js'
 
-const CAMPUS = 22
 const PISCINA = 2609 // "Piscina", el proyecto que usan los ejemplos de la API
 const LIBFT = 1337
 
 let db: Db
 let users: ReturnType<typeof createUsersRepository>
-let locations: ReturnType<typeof createLocationsRepository>
 let projects: ReturnType<typeof createProjectsRepository>
 let availability: ReturnType<typeof createAvailabilityRepository>
 let syncState: ReturnType<typeof createSyncStateRepository>
 
 /** Entrada de campus con los campos mínimos que usa el repositorio. */
-function campusEntry(
-  login: string,
-  id: number,
-  host: string | null,
-  primary = true,
-): ApiCampusLocation {
-  return { host, primary, campus_id: CAMPUS, user: { id, login, kind: 'student' } }
-}
-
 beforeEach(() => {
   db = openDatabase(':memory:')
   users = createUsersRepository(db)
-  locations = createLocationsRepository(db)
   projects = createProjectsRepository(db)
   availability = createAvailabilityRepository(db)
   syncState = createSyncStateRepository(db)
@@ -107,45 +93,62 @@ describe('repositorio de personas', () => {
     }).not.toThrow()
     expect(users.count()).toBe(0)
   })
+
+  it('guarda la ubicación que trae la API', () => {
+    users.upsertMany([{ login: 'albrodri', id: 42, location: 'c2r17s2' }])
+
+    expect(users.findByLogin('albrodri')?.current_location).toBe('c2r17s2')
+    expect(users.findByLogin('albrodri')?.location_synced_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  })
+
+  it('borra la ubicación cuando la API dice que ya no está en el campus', () => {
+    users.upsertMany([{ login: 'albrodri', id: 42, location: 'c2r17s2' }])
+    users.upsertMany([{ login: 'albrodri', id: 42, location: null }])
+
+    expect(users.findByLogin('albrodri')?.current_location).toBeNull()
+  })
+
+  it('NO borra la ubicación si el endpoint no habla de ubicaciones', () => {
+    // El matiz que hace que todo esto funcione: `undefined` es "este endpoint no
+    // dice dónde está", no "no está". `/projects_users` manda resúmenes sin
+    // `location`, y si se tomaran como `null` todo el mundo aparecería fuera del
+    // campus en cuanto se sincronizara cualquier proyecto.
+    users.upsertMany([{ login: 'albrodri', id: 42, location: 'c2r17s2' }])
+    users.upsertMany([{ login: 'albrodri', id: 42, imageUrl: 'https://cdn/nuevo.jpg' }])
+
+    expect(users.findByLogin('albrodri')?.current_location).toBe('c2r17s2')
+    // La foto sí se actualiza: cada endpoint solo informa de lo suyo.
+    expect(users.findByLogin('albrodri')?.image_url).toBe('https://cdn/nuevo.jpg')
+  })
+
+  it('propaga undefined como "no informado" desde el objeto de la API', () => {
+    // `toUserInput` no debe convertir el `undefined` de la API en `null`, o el
+    // test anterior pasaría por casualidad y este por nada.
+    expect(toUserInput({ id: 1, login: 'albrodri' }).location).toBeUndefined()
+    expect(toUserInput({ id: 1, login: 'albrodri', location: null }).location).toBeNull()
+    expect(toUserInput({ id: 1, login: 'albrodri', location: 'c1r2s1' }).location).toBe('c1r2s1')
+  })
 })
 
-describe('repositorio de ubicaciones', () => {
+describe('ubicaciones y disponibilidad', () => {
   beforeEach(() => {
     users.upsertMany([
-      { login: 'albrodri', id: 1 },
-      { login: 'plopez-l', id: 2 },
+      { login: 'albrodri', id: 1, location: 'c2r17s2' },
+      { login: 'plopez-l', id: 2, location: null },
     ])
-  })
-
-  it('guarda el puesto en el cluster de cada persona', () => {
-    locations.replaceSnapshot(CAMPUS, [campusEntry('albrodri', 1, 'c2r17s2')])
-
-    expect(locations.findByLogin('albrodri', CAMPUS)?.host).toBe('c2r17s2')
-    expect(locations.countByCampus(CAMPUS)).toBe(1)
-  })
-
-  it('hace desaparecer a quien se va del campus al siguiente snapshot', () => {
-    locations.replaceSnapshot(CAMPUS, [campusEntry('albrodri', 1, 'c2r17s2')])
-    locations.replaceSnapshot(CAMPUS, [campusEntry('plopez-l', 2, 'c2r20s1')])
-
-    // El snapshot sustituye, no acumula: quien se fue ya no está.
-    expect(locations.findByLogin('albrodri', CAMPUS)).toBeUndefined()
-    expect(locations.countByCampus(CAMPUS)).toBe(1)
-  })
-
-  it('ignora entradas sin puesto, porque no sirven de nada', () => {
-    locations.replaceSnapshot(CAMPUS, [campusEntry('albrodri', 1, null)])
-
-    expect(locations.countByCampus(CAMPUS)).toBe(0)
   })
 
   it('conserva la disponibilidad de quien se va del campus', () => {
     availability.set('albrodri', true)
-    locations.replaceSnapshot(CAMPUS, [campusEntry('albrodri', 1, 'c2r17s2')])
-    locations.replaceSnapshot(CAMPUS, [])
 
     // La disponibilidad es un dato nuestro y no se borra al salir del campus.
     // Lo que decide si está "de guardia" es la combinación de los dos campos.
+    expect(availability.get('albrodri')).toBe(true)
+
+    // Al irse del campus, lo que se pierde es el puesto, no la guardia.
+    users.upsertMany([{ login: 'albrodri', id: 1, location: null }])
+
+    expect(users.findByLogin('albrodri')?.current_location).toBeNull()
     expect(availability.get('albrodri')).toBe(true)
   })
 })
@@ -194,10 +197,10 @@ describe('repositorio de proyectos y peers', () => {
     // legomez: aprobó Piscina, está en el campus pero fuera de turno.
     // outsider: tiene Piscina en curso pero no sabemos dónde está.
     users.upsertMany([
-      { login: 'albrodri', id: 1, imageUrl: 'https://cdn/a.jpg' },
-      { login: 'plopez-l', id: 2 },
-      { login: 'legomez', id: 3 },
-      { login: 'outsider', id: 4 },
+      { login: 'albrodri', id: 1, imageUrl: 'https://cdn/a.jpg', location: 'c2r17s2' },
+      { login: 'plopez-l', id: 2, location: null },
+      { login: 'legomez', id: 3, location: 'c2r20s1' },
+      { login: 'outsider', id: 4, location: null },
     ])
 
     projects.replaceForUser('albrodri', [
@@ -213,11 +216,8 @@ describe('repositorio de proyectos y peers', () => {
       { status: 'in_progress', project: { id: PISCINA, name: 'Piscina' } },
     ])
 
-    locations.replaceSnapshot(CAMPUS, [
-      campusEntry('albrodri', 1, 'c2r17s2'),
-      campusEntry('legomez', 3, 'c2r20s1'),
-    ])
-
+    // Solo albrodri está de guardia. Se marca después de insertar las personas
+    // porque `availability.login` es clave foránea contra `users.login`.
     availability.set('albrodri', true)
   })
 
@@ -232,7 +232,7 @@ describe('repositorio de proyectos y peers', () => {
   })
 
   it('trae a los participantes del proyecto con los cuatro campos del contrato', () => {
-    const peers = projects.findPeers(PISCINA, CAMPUS)
+    const peers = projects.findPeers(PISCINA)
 
     expect(peers.map((peer) => peer.login).sort()).toEqual([
       'albrodri',
@@ -254,7 +254,7 @@ describe('repositorio de proyectos y peers', () => {
   })
 
   it('distingue a quien está en el campus de quien no', () => {
-    const peers = projects.findPeers(PISCINA, CAMPUS)
+    const peers = projects.findPeers(PISCINA)
     const byLogin = new Map(peers.map((peer) => [peer.login, peer]))
 
     expect(byLogin.get('albrodri')?.location).toBe('c2r17s2')
@@ -262,8 +262,36 @@ describe('repositorio de proyectos y peers', () => {
     expect(byLogin.get('outsider')?.location).toBeNull()
   })
 
+  it('olvida una ubicación que lleva demasiado tiempo sin refrescar', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-10-04T12:00:00.000Z'))
+
+      // Se reinscribe con el reloj congelado para que `location_synced_at` sea
+      // ese momento y no el real, con el que el corte no tendría sentido.
+      users.upsertMany([
+        { login: 'albrodri', id: 1, imageUrl: 'https://cdn/a.jpg', location: 'c2r17s2' },
+      ])
+
+      expect(projects.findPeers(PISCINA).find((p) => p.login === 'albrodri')?.location).toBe('c2r17s2')
+
+      // Pasada la ventana, el puesto del cluster sigue ahí en la base pero ya no
+      // se cuenta: puede que la persona se levantara hace media hora.
+      vi.setSystemTime(new Date('2026-10-04T12:31:00.000Z'))
+
+      const peer = projects.findPeers(PISCINA).find((p) => p.login === 'albrodri')
+
+      expect(peer?.location).toBeNull()
+      // Caducar la ubicación no debe tocar nada más del peer.
+      expect(peer?.available).toBe(true)
+      expect(peer?.image).toBe('https://cdn/a.jpg')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('marca como especialista a quien ya aprobó el proyecto', () => {
-    const peers = projects.findPeers(PISCINA, CAMPUS)
+    const peers = projects.findPeers(PISCINA)
     const byLogin = new Map(peers.map((peer) => [peer.login, peer]))
 
     expect(byLogin.get('albrodri')?.status).toBe('in_progress')
@@ -271,7 +299,7 @@ describe('repositorio de proyectos y peers', () => {
   })
 
   it('deja available en false a quien no ha marcado disponibilidad', () => {
-    const peers = projects.findPeers(PISCINA, CAMPUS)
+    const peers = projects.findPeers(PISCINA)
     const byLogin = new Map(peers.map((peer) => [peer.login, peer]))
 
     // legomez está en el campus pero fuera de turno: available false, no undefined.
@@ -287,18 +315,18 @@ describe('repositorio de proyectos y peers', () => {
     ])
     users.upsertMany([{ login: 'raro', id: 99 }])
 
-    expect(projects.findPeers(PISCINA, CAMPUS).map((peer) => peer.login)).not.toContain('raro')
+    expect(projects.findPeers(PISCINA).map((peer) => peer.login)).not.toContain('raro')
   })
 
   it('olvida un proyecto que alguien ya no tiene', () => {
     // La API dejó de devolverlo: es un snapshot, así que desaparece.
     projects.replaceForUser('albrodri', [])
 
-    expect(projects.findPeers(PISCINA, CAMPUS).map((peer) => peer.login)).not.toContain('albrodri')
+    expect(projects.findPeers(PISCINA).map((peer) => peer.login)).not.toContain('albrodri')
   })
 
   it('devuelve lista vacía para un proyecto sin participantes', () => {
-    expect(projects.findPeers(999999, CAMPUS)).toEqual([])
+    expect(projects.findPeers(999999)).toEqual([])
   })
 
   it('expone el catálogo de proyectos', () => {
@@ -322,18 +350,15 @@ describe('estado de la sincronización', () => {
 
   it('guarda y lee fechas', () => {
     const moment = new Date('2026-10-04T10:00:00.000Z')
-    syncState.setDate(SYNC_KEYS.CAMPUS_LOCATIONS, moment)
-
-    expect(syncState.getDate(SYNC_KEYS.CAMPUS_LOCATIONS)?.toISOString()).toBe(
-      '2026-10-04T10:00:00.000Z',
-    )
+    syncState.setDate(SYNC_KEYS.USER_PROJECTS, moment)
+    expect(syncState.getDate(SYNC_KEYS.USER_PROJECTS)?.toISOString()).toBe('2026-10-04T10:00:00.000Z')
   })
 
   it('trata un checkpoint corrupto como "nunca sincronizado"', () => {
-    syncState.set(SYNC_KEYS.CAMPUS_LOCATIONS, 'no-es-una-fecha')
+    syncState.set(SYNC_KEYS.USER_PROJECTS, 'no-es-una-fecha')
 
     // No debe lanzar: se sincroniza de cero antes que tumbar el arranque.
-    expect(syncState.getDate(SYNC_KEYS.CAMPUS_LOCATIONS)).toBeUndefined()
+    expect(syncState.getDate(SYNC_KEYS.USER_PROJECTS)).toBeUndefined()
   })
 
   it('sobrescribe sin duplicar la clave', () => {

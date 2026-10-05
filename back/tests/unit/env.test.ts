@@ -25,7 +25,6 @@ describe('loadEnv', () => {
     const env = loadEnv(validEnv())
 
     expect(env.PORT).toBe(3000)
-    expect(env.CAMPUS_ID).toBe(22)
     expect(env.CURSUS_ID).toBe(21)
     expect(env.PAGE_SIZE).toBe(100)
     expect(env.DATABASE_PATH).toBe('data/sanatorio.db')
@@ -52,10 +51,9 @@ describe('loadEnv', () => {
   })
 
   it('convierte los números de cadena en número', () => {
-    const env = loadEnv({ ...validEnv(), PORT: '8080', CAMPUS_ID: '9' })
+    const env = loadEnv({ ...validEnv(), PORT: '8080' })
 
     expect(env.PORT).toBe(8080)
-    expect(env.CAMPUS_ID).toBe(9)
   })
 
   it('rechaza un puerto que no es un número', () => {

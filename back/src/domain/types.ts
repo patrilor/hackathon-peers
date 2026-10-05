@@ -32,12 +32,30 @@ export type CurrentUser = {
 export type Peer = {
   login: string
   image: string | null
-  /** Puesto en el cluster (`"c2r17s2"`), o `null` si no está en el campus. */
+  /**
+   * Puesto en el cluster (`"c2r17s2"`), o `null` si no está en el campus.
+   *
+   * `null` significa dos cosas a propósito: que la persona no está en el campus,
+   * o que sí lo estaba pero hace tanto que no nos fiamos. Un puesto del cluster
+   * caduca en cuanto alguien se levanta, así que preferimos no afirmarlo antes
+   * que mentir. Ver `LOCATION_MAX_AGE_MS`.
+   */
   location: string | null
   /** Lo pone Sanatorio, no la API de 42. */
   available: boolean
   status: ProjectStatus
 }
+
+/**
+ * Antigüedad máxima de una ubicación para seguir creyéndola.
+ *
+ * La ubicación no se pide suelta: llega dentro de los participantes de un
+ * proyecto, que se refrescan como mucho cada 15 minutos
+ * (`FRESHNESS.projectParticipants`). Con media hora de margen, un puesto se da
+ * por perdido solo si de verdad dejamos de mirar, no por un refresco que aún no
+ * tocaba.
+ */
+export const LOCATION_MAX_AGE_MS = 30 * 60_000
 
 /** Respuesta de `PUT /me/availability`. */
 export type AvailabilityResponse = {
@@ -51,14 +69,17 @@ export type ApiUser = {
   kind?: string
   image?: { url?: string } | null
   usual_full_name?: string | null
-}
-
-/** Entrada de `/campus/:id/locations` tal y como la devuelve la API. */
-export type ApiCampusLocation = {
-  host: string | null
-  primary?: boolean
-  campus_id: number
-  user: ApiUser
+  /**
+   * Puesto en el cluster (`"c2r17s2"`) en el que está **ahora mismo**, o `null`
+   * si no está en el campus. Lo trae `GET /v2/users/:login` y también los
+   * objetos de usuario completos que vienen en otros endpoints.
+   *
+   * La diferencia entre `undefined` y `null` importa: `undefined` es que este
+   * endpoint no habla de ubicación, y `null` es que sí habla y dice que no está.
+   * Los resúmenes de usuario no lo incluyen, así que no se puede tratar ambos
+   * igual al guardar.
+   */
+  location?: string | null
 }
 
 /** Estado de una persona en un proyecto, tal y como viene en `projects_users`. */

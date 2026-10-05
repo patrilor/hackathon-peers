@@ -9,15 +9,7 @@ import type { ProjectsRepository } from '../db/repositories/projects.js'
 import { domainError } from '../domain/errors.js'
 import type { Peer, ProjectSummary } from '../domain/types.js'
 
-export type ProjectsServiceOptions = {
-  /** Campus cuyos compañeros se muestran. Solo hay uno sincronizado. */
-  campusId: number
-}
-
-export function createProjectsService(
-  projects: ProjectsRepository,
-  options: ProjectsServiceOptions,
-) {
+export function createProjectsService(projects: ProjectsRepository) {
   /** Ids de proyecto válidos: enteros positivos, como los de la 42. */
   function assertValidProjectId(projectId: number): void {
     if (!Number.isInteger(projectId) || projectId <= 0) {
@@ -52,7 +44,7 @@ export function createProjectsService(
         throw domainError('not_found', `El proyecto ${projectId} no está en la réplica local`)
       }
 
-      const peers = projects.findPeers(projectId, options.campusId)
+      const peers = projects.findPeers(projectId)
 
       return excludeLogin === undefined
         ? peers

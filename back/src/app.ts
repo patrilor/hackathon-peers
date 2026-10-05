@@ -104,7 +104,7 @@ export function buildApp(options: BuildOptions = {}): BuiltApp {
     assertSchemaIsCurrent(db)
   }
 
-  const services = createServices(db, env.CAMPUS_ID)
+  const services = createServices(db)
   const fetchImpl = options.fetchImpl ?? fetch
 
   const oauth = createOAuthClient({
@@ -127,11 +127,7 @@ export function buildApp(options: BuildOptions = {}): BuiltApp {
   })
 
   const client = createApiClient(env, fetchImpl)
-  const synchronizer = createSynchronizer({
-    services,
-    client,
-    campusId: env.CAMPUS_ID,
-  })
+  const synchronizer = createSynchronizer({ services, client })
 
   const app = Fastify({
     logger: options.logger ?? false,

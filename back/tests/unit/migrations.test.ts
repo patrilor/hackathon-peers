@@ -37,7 +37,6 @@ describe('migraciones', () => {
     expect(tables).toEqual(
       expect.arrayContaining([
         'users',
-        'user_locations',
         'projects',
         'user_projects',
         'availability',

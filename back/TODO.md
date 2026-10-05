@@ -27,10 +27,11 @@ Hoy la aplicación **no arrancaría**: faltan `FRONTEND_ORIGINS`,
       _single-flight_ para no pedir diez tokens a la vez.
 - [x] Rate limiter: mínimo de 550 ms entre llamadas y tope por minuto.
 - [x] Reintentos con backoff exponencial, respetando la cabecera `Retry-After`.
-- [x] Timeouts diferenciados: 30 s normal, 120 s para `locations`.
-- [x] Paginación de `users`, `projects_users` y `locations`.
-- [x] Endpoints tipados: `/v2/me`, `/users/:login/projects_users`,
-      `/projects/:id/users`, `/campus/:id/locations`, `/campus/:id/users`.
+- [x] Timeout de 30 s por petición. Sin timeout "pesado": el único endpoint que
+      lo necesitaba (`/campus/:id/locations`) está descartado.
+- [x] Paginación de `users`, `projects_users` y `projects`.
+- [x] Endpoints tipados: `/v2/me`, `/users/:login`, `/users/:login/projects_users`,
+      `/projects/:id/users`, `/campus/:id/users`.
 - [x] Tests con `fetch` simulado: caché de token, 429, reintentos, timeout, paginación.
 
 ## 3. Servicios de dominio `finish`
@@ -139,7 +140,9 @@ Fuera del alcance del código: se hace cuando haya VM.
 
 - Rama de trabajo: `back`. Nunca se hace push a `main`.
 - Antes del PR final: `git merge main` para traer los cambios del front.
-- La API limita a 2 req/s y 1200 req/h. `/campus/:id/locations` tarda
-  cerca del minuto y revienta con un timeout de 30 s.
+- La API limita a 2 req/s y 1200 req/h. `/campus/:id/locations` devuelve
+  `X-Total: 751 077` (7 511 páginas) y no se puede filtrar a las activas: está
+  descartado. La ubicación actual sale del campo `location` de
+  `GET /v2/users/:login`.
 - `availability` es el único dato que no viene de 42: es nuestro.
 - Regla de guardia: `available === true && location !== null`.

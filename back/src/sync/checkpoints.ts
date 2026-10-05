@@ -8,14 +8,12 @@
  */
 
 export type SyncTarget =
-  'projects_catalog' | 'campus_locations' | 'user_projects' | 'project_participants'
+  'projects_catalog' | 'user_projects' | 'project_participants'
 
 /** Claves de `sync_state`, una por lo que se puede sincronizar. */
 export const syncKeys = {
   /** Catálogo de proyectos. Cambia pocas veces al día. */
   projectsCatalog: (): string => 'sync:projects:catalog',
-  /** Puestos del campus. */
-  campusLocations: (campusId: number): string => `sync:campus:${campusId}:locations`,
   /** Proyectos de una persona. */
   userProjects: (login: string): string => `sync:user:${login}:projects`,
   /** Participantes de un proyecto. */

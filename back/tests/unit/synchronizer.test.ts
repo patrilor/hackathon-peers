@@ -11,12 +11,10 @@ import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../src/api/errors.js'
 import { openDatabase } from '../../src/db/database.js'
 import { createServices } from '../../src/services/container.js'
-import { FRESHNESS } from '../../src/sync/freshness.js'
 import { shouldSync } from '../../src/sync/freshness.js'
 import { createSynchronizer } from '../../src/sync/synchronizer.js'
 import type { SyncClient } from '../../src/sync/synchronizer.js'
 
-const CAMPUS_ID = 22
 const START = Date.UTC(2026, 9, 4, 12, 0, 0)
 
 /** Reloj controlable, para no dormir de verdad en los tests. */
@@ -66,10 +64,6 @@ function makeClient(overrides: Partial<Record<keyof SyncClient, unknown>> = {}) 
       calls.push('catalog')
       return reply(pick('getProjectCatalog', [{ id: 10, name: 'ft_printf' }]))
     },
-    getCampusLocations: async () => {
-      calls.push('locations')
-      return reply(pick('getCampusLocations', []))
-    },
     getUserProjects: async (login: string) => {
       calls.push(`projects:${login}`)
       return reply(pick('getUserProjects', [{ status: 'in_progress', project: { id: 10 } }]))
@@ -90,7 +84,7 @@ function makeClient(overrides: Partial<Record<keyof SyncClient, unknown>> = {}) 
 /** Base en memoria con reloj y doble de API montados. */
 function makeSync(overrides: Partial<Record<keyof SyncClient, unknown>> = {}) {
   const db = openDatabase(':memory:')
-  const services = createServices(db, CAMPUS_ID)
+  const services = createServices(db)
   const clock = makeClock()
   const { client, calls } = makeClient(overrides)
   const log = vi.fn()
@@ -98,7 +92,6 @@ function makeSync(overrides: Partial<Record<keyof SyncClient, unknown>> = {}) {
   const synchronizer = createSynchronizer({
     services,
     client,
-    campusId: CAMPUS_ID,
     now: clock.now,
     log,
   })
@@ -138,8 +131,8 @@ describe('sincronizador', () => {
 
       const results = await synchronizer.syncGlobal()
 
-      expect(calls).toEqual(['catalog', 'locations'])
-      expect(results.map((r) => r.outcome)).toEqual(['updated', 'updated'])
+      expect(calls).toEqual(['catalog'])
+      expect(results.map((r) => r.outcome)).toEqual(['updated'])
     })
 
     it('no vuelve a pedir lo que está fresco', async () => {
@@ -150,20 +143,8 @@ describe('sincronizador', () => {
 
       const results = await synchronizer.syncGlobal()
 
-      expect(calls).toEqual(['catalog', 'locations'])
+      expect(calls).toEqual(['catalog'])
       expect(results.every((r) => r.outcome === 'skipped_fresh')).toBe(true)
-    })
-
-    it('repite las ubicaciones pasado el margen de frescura', async () => {
-      const { synchronizer, calls, clock } = makeSync()
-
-      await synchronizer.syncGlobal()
-      clock.advance(FRESHNESS.campusLocations.minAgeMs + 1)
-
-      await synchronizer.syncGlobal()
-
-      // El catálogo dura horas; las ubicaciones se repasan.
-      expect(calls).toEqual(['catalog', 'locations', 'locations'])
     })
 
     it('replica el catálogo con id y nombre', async () => {
@@ -178,25 +159,6 @@ describe('sincronizador', () => {
 
       expect(services.projects.nameOf(10)).toBe('ft_printf')
       expect(services.projects.nameOf(11)).toBe('push_swap')
-    })
-
-    it('replica las ubicaciones del campus', async () => {
-      const { synchronizer, services } = makeSync({
-        getCampusLocations: [
-          {
-            host: 'c2r4s6',
-            campus_id: CAMPUS_ID,
-            user: { id: 1, login: 'albrodri' },
-          },
-        ],
-      })
-
-      await synchronizer.syncGlobal()
-
-      // La ubicación llega con el usuario embebido, así que también se replica
-      // la persona: sin ella, `availability` no podría escribir por la FK.
-      expect(services.repositories.locations.findByLogin('albrodri')?.host).toBe('c2r4s6')
-      expect(services.users.exists('albrodri')).toBe(true)
     })
 
     it('NO vacía el catálogo si la API devuelve una lista vacía', async () => {
@@ -346,9 +308,8 @@ describe('sincronizador', () => {
 
       expect(calls).toEqual([
         'catalog',
-        'locations',
         'projects:albrodri',
-        // Nadie vino en las ubicaciones, así que hay que resolver su id.
+        // Todavía no está en la réplica, así que hay que pedirlo para tener su id.
         'user:albrodri',
         'participants:10',
         'participants:11',
@@ -382,8 +343,6 @@ describe('sincronizador', () => {
 
       const results = await synchronizer.syncGlobal()
       expect(results[0]?.outcome).toBe('failed')
-      // Las ubicaciones, que vienen detrás, se intentan igualmente.
-      expect(results[1]?.outcome).toBe('updated')
 
       // Sin checkpoint, la siguiente vuelta lo vuelve a pedir.
       clock.advance(1_000)
@@ -432,7 +391,7 @@ describe('sincronizador', () => {
       clock.advance(1_000)
       const second = await synchronizer.syncGlobal()
 
-      expect(synchronizer.summarize([...first, ...second])).toBe('updated:2 skipped_fresh:2')
+      expect(synchronizer.summarize([...first, ...second])).toBe('updated:1 skipped_fresh:1')
     })
 
     it('dice "nada que hacer" con la lista vacía', () => {

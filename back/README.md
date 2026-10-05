@@ -4,6 +4,11 @@ Backend de [Sanatorio 42](https://github.com/patrilor/hackathon-peers): login co
 la API de 42 y consulta de quién puede echarte un cable cuando te atascas con un
 proyecto.
 
+Documentos: [`TODO.md`](TODO.md) lleva el estado por bloques de trabajo,
+[`API_42.md`](API_42.md) el detalle de cada endpoint de la API de 42, y
+[`CONTEXTO_TRABAJO.md`](CONTEXTO_TRABAJO.md) el contexto de por qué el código está
+como está y qué queda pendiente.
+
 La idea es no preguntar a la API de 42 en cada visita. Cada petición del front se
 responde desde **SQLite**, y por detrás un sincronizador va manteniendo la copia al
 día. Así el front va rápido, la API de 42 no se satura, y si la API se cae
@@ -149,6 +154,33 @@ navegador se queda sin sesión.
 - Cada checkpoint guarda qué se sincronizó y cuándo, así que solo se vuelve a pedir
   lo caducado.
 - Si el catálogo viene vacío no se destruye nada: se conserva lo que ya había.
+
+### Dónde sale la ubicación
+
+Del campo `location` de `GET /v2/users/:login`, que es el puesto actual
+(`"c1r2s1"`) o `null` si la persona no está en el campus. Se guarda en
+`users.current_location`.
+
+**No** se usa `GET /v2/campus/:id/locations`, que era lo natural y es un
+callejón: devuelve `X-Total: 751 077` para Madrid, o sea 7 511 páginas de 100, y
+no es el estado actual sino el **histórico** de todos los puestos desde siempre.
+No hay filtro que lo recorte a las ubicaciones vigentes
+(`filter[end_at]=nil` responde `422`). A 550 ms por petición serían unas 69
+minutos de reloj, y contra la cuota de 1200/h, más de seis horas: el
+sincronizador no terminaría nunca.
+
+El matiz al guardar es que `undefined` y `null` **no** son lo mismo:
+
+| Lo que trae la API | Significa | Qué hace el `upsert` |
+|---|---|---|
+| `"c1r2s1"` | Está en ese puesto | Sobrescribe |
+| `null` | No está en el campus | **Borra** la ubicación guardada |
+| la clave no viene | Este endpoint no habla de ubicaciones | **No toca** la guardada |
+
+Si se confundieran `undefined` y `null`, cualquier sincronización de
+`projects_users` (que manda resúmenes sin `location`) vaciaría las ubicaciones y
+todo el mundo aparecería "fuera del centro". Hay tests que lo fijan en
+`tests/unit/repositories.test.ts`.
 
 ### Fallos y caché
 

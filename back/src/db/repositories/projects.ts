@@ -9,6 +9,7 @@
 import type { Db } from '../database.js'
 import { nowIso } from '../database.js'
 import {
+  LOCATION_MAX_AGE_MS,
   PROJECT_STATUS,
   type ApiProjectUser,
   type Peer,
@@ -19,7 +20,7 @@ import {
 type PeerRow = {
   login: string
   image_url: string | null
-  host: string | null
+  current_location: string | null
   available: number | null
   status: string
 }
@@ -182,27 +183,36 @@ export function createProjectsRepository(db: Db) {
      * disponibilidad es un compañero que existe, y el front decide qué
      * mostrar con esos tres campos.
      */
-    findPeers(projectId: number, campusId: number): Peer[] {
+    findPeers(projectId: number): Peer[] {
+      // Una ubicación que no se refresca desde hace media hora es un puesto
+      // del cluster que alguien ya no ocupa, así que se entrega como desconocida.
+      // El corte se compara como texto porque todas las marcas se guardan con el
+      // mismo formato ISO UTC (ver `nowIso`).
+      const cutoff = new Date(Date.now() - LOCATION_MAX_AGE_MS).toISOString()
+
       const rows = db
         .prepare<unknown[], PeerRow>(
           `SELECT u.login,
                   u.image_url,
-                  ul.host,
+                  CASE WHEN u.location_synced_at >= @cutoff
+                       THEN u.current_location
+                       ELSE NULL END AS current_location,
                   a.available,
                   up.status
              FROM user_projects up
              JOIN users u        ON u.login = up.login
-             LEFT JOIN user_locations ul ON ul.login = u.login AND ul.campus_id = @campus_id
              LEFT JOIN availability    a  ON a.login  = u.login
             WHERE up.project_id = @project_id
             ORDER BY u.login`,
         )
-        .all({ project_id: projectId, campus_id: campusId })
+        .all({ project_id: projectId, cutoff })
 
       return rows.map((row) => ({
         login: row.login,
         image: row.image_url,
-        location: row.host,
+        // Antes era `host` desde `user_locations`; ahora es `current_location`
+        // directo de la tabla `users`, y solo si está fresco.
+        location: row.current_location,
         // Sin fila en `availability` significa que nunca lo marcó: no está de
         // guardia. Nunca `undefined`, porque el front espera un booleano.
         available: row.available === 1,

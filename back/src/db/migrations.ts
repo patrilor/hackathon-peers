@@ -118,6 +118,31 @@ export const MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX idx_sessions_expires_at ON sessions (expires_at)`,
     ],
   },
+  {
+    version: 3,
+    name: 'ubicaciones-en-usuarios',
+    statements: [
+      // --- La ubicación pasa a ser de la persona --------------------------
+      // `/campus/:id/locations` devolvía `X-Total: 751 077` para Madrid, o sea
+      // 7 511 páginas de 100. A 550 ms por petición son unas 69 minutos de
+      // reloj, y contra la cuota de 1200 por hora serían más de seis horas: el
+      // sincronizador no terminaría nunca. Ese endpoint devuelve además el
+      // histórico de ubicaciones, no solo las de ahora, así que no hay forma de
+      // filtrar por las activas.
+      //
+      // La ubicación actual ya viene en el propio usuario (`GET /v2/users/:login`
+      // y los objetos completos de otros endpoints), así que se guarda aquí y
+      // se lee de aquí. Una petición por persona en vez de 7 511.
+      `ALTER TABLE users ADD COLUMN current_location TEXT`,
+      // Cuándo se observó esa ubicación. Sin esto, alguien que se fue del
+      // campus seguiría figurando como "en c2r17s2" hasta que volviéramos a
+      // mirarlo, y con la cuota tan justa puede que nunca volviéramos.
+      `ALTER TABLE users ADD COLUMN location_synced_at TEXT`,
+
+      // La tabla queda inútil: ya no hay snapshot del campus.
+      `DROP TABLE user_locations`,
+    ],
+  },
 ]
 
 /** Versión más alta que existe en el código. */

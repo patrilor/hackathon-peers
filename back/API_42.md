@@ -507,7 +507,7 @@ elige la que corresponda al entorno.
 |---|---|
 | `POST /oauth/token` con `client_credentials` | `200`, token correcto |
 | `GET /oauth/token/info` | `200`, `"scopes": ["public"]` (esperable en Client Credentials) |
-| `GET /v2/users/:login` | `200`, con todos los campos |
+| `GET /v2/users/:login` | `200`, con todos los campos. Trae `location`: puesto actual o `null` |
 | `GET /v2/projects` | `200`, **1 702** proyectos |
 | `GET /v2/users/:login/projects_users` | `200`. Funciona con `public`: **no hace falta `profile` ni `projects`** |
 | `GET /v2/users/:login/locations` | `200`. Por usuario: 0–406 filas según el usuario |
@@ -517,13 +517,21 @@ elige la que corresponda al entorno.
 > funciona con el scope `public` de la app. El scope de identidad solo hace falta
 > para `/v2/me`, y eso ya lo pedía el login con token de usuario.
 
-> 🚨 **`/v2/campus/22/locations` no se puede paginar.** Devuelve
+> 🚨 **`/v2/campus/22/locations` está descartado.** Devuelve
 > `X-Total: 751 077`, o sea **7 511 páginas** de 100. A 550 ms por petición son
-> unas 69 minutos, y contra la cuota de 1200/h el limitador acabaría bloqueando
-> más de una hora y el sincronizador **nunca terminaría**. No es que sea lento: es
-> que el endpoint devuelve el *histórico* de ubicaciones del campus, no solo las
-> de ahora. La alternativa correcta es `/v2/users/:login/locations`, que es una
-> petición por usuario y viene con `end_at: null` en la ubicación vigente.
+> unas 69 minutos, y contra la cuota de 1200/h serían más de seis horas de
+> limitador bloqueado y el sincronizador **nunca terminaría**. No es que sea
+> lento: es
+> que devuelve el *histórico* completo de ubicaciones del campus, no solo las de
+> ahora, y no admite filtro para quedarse con las activas
+> (`filter[end_at]=nil` responde `422`).
+>
+> **Qué se usa en su lugar:** el campo `location` de `GET /v2/users/:login`, que
+> es el puesto actual (`"c1r2s1"`) o `null` si no está en el campus. Una petición
+> por persona y el dato fresco, que es justo lo que hace falta para mostrar "ve a
+> su puesto". Descartado también `/v2/users/:login/locations`: funciona, pero
+> devuelve el histórico del usuario (0–406 filas según la persona), así que hay
+> que filtrar por `end_at: null` para quedarse con una sola.
 
 ### 3.2 Mapa de scopes
 
@@ -1325,7 +1333,7 @@ Leyenda: ✅ verificado con la app actual (scope `public`) · 🔒 requiere scop
 | `GET /v2/campus` | Todos los campus (~60) | ✅ |
 | `GET /v2/campus/:id` | Un campus | ✅ |
 | `GET /v2/campus/:id/users` | Usuarios del campus (paginado) | ✅ |
-| `GET /v2/campus/:id/locations` | Localizaciones activas en el campus | ✅ |
+| `GET /v2/campus/:id/locations` | Histórico de ubicaciones del campus | ❌ 751 077 filas, inviable |
 | `GET /v2/campus/:id/events` | Eventos del campus | ✅ |
 | `GET /v2/campus/:id/products` | Productos de la tienda | ✅ |
 | `GET /v2/campus/:id/achievements` | Logros del campus | ✅ |

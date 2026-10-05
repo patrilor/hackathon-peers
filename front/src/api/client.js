@@ -26,6 +26,16 @@ export const realApi = {
 
   getPeers: (projectId) => request(`/projects/${projectId}/peers`),
 
+  // El back responde `GET /me/availability` con `{ available: true }` (envuelve
+  // el booleano en `AvailabilityResponse`). Aquí se desenvuelve para devolver
+  // un booleano, que es lo que espera `mockApi.getAvailability` y lo que
+  // consume AvailabilityToggle. Si no se desenvuelve, `guardando === true` en
+  // el componente nunca sería cierto y el interruptor se vería apagado siempre.
+  getAvailability: async () => {
+    const respuesta = await request('/me/availability')
+    return respuesta.available === true
+  },
+
   setAvailability: (available) =>
     request('/me/availability', {
       method: 'PUT',

@@ -12,7 +12,8 @@
  * | `/v2/me`                                | Necesita token de **usuario** y scope de identidad (`profile`). Con token de app devuelve 404. |
  * | `/v2/users/:login/projects_users`       | Trae el estado por proyecto. No trae el nombre del proyecto. |
  * | `/v2/projects/:id/users`                | Participantes de todo el histórico. No trae estado. |
- * | `/v2/campus/:id/locations`              | Solo el campus. Tarda ~1 min: revienta con timeout de 30 s. |
+ * | `/v2/users/:login`                      | Trae `location`: el puesto actual, o `null`. |
+ * | `/v2/campus/:id/locations`              | DESCARTADO: histórico completo, inviable. Ver `getUser`. |
  * | `/v2/campus/:id/projects/:pid/users`    | No existe (404). Por eso no se usa.   |
  * | `?filter[login]=a,b,c`                  | Funciona, pero no resuelve el estado. |
  */
@@ -20,7 +21,7 @@
 import type { RateLimiter } from './rate-limiter.js'
 import { TokenManager } from './token-manager.js'
 import { ApiError, apiErrorFromNetwork, apiErrorFromResponse, endpointFromUrl } from './errors.js'
-import type { ApiCampusLocation, ApiProjectUser, ApiUser } from '../domain/types.js'
+import type { ApiProjectUser, ApiUser } from '../domain/types.js'
 
 /** Configuración del cliente. */
 export type FortyTwoClientOptions = {
@@ -28,10 +29,8 @@ export type FortyTwoClientOptions = {
   apiV2Base: string
   /** `User-Agent` de la aplicación. */
   userAgent: string
-  /** Timeout de las peticiones normales. */
+  /** Timeout de cada petición. */
   timeoutMs: number
-  /** Timeout de las pesadas (`/locations` se acerca al minuto). */
-  heavyTimeoutMs: number
   /** Peticiones por página. Máximo de la API: 100. */
   pageSize: number
   /** Limitador compartido por todas las peticiones del proceso. */
@@ -66,7 +65,6 @@ export class FortyTwoClient {
   private readonly apiV2Base: string
   private readonly userAgent: string
   private readonly timeoutMs: number
-  private readonly heavyTimeoutMs: number
   private readonly pageSize: number
   private readonly limiter: RateLimiter
   private readonly tokens: TokenManager
@@ -81,7 +79,6 @@ export class FortyTwoClient {
     this.apiV2Base = options.apiV2Base
     this.userAgent = options.userAgent
     this.timeoutMs = options.timeoutMs
-    this.heavyTimeoutMs = options.heavyTimeoutMs
     this.pageSize = options.pageSize
     this.limiter = options.limiter
     this.tokens = options.tokens
@@ -144,24 +141,25 @@ export class FortyTwoClient {
   }
 
   /**
-   * `GET /v2/campus/:id/locations`: quién está ahora mismo en el campus.
+   * `GET /v2/campus/:id/users`: el censo del campus.
    *
-   * El endpoint más lento de los que usamos: con Madrid se acerca al minuto,
-   * y verificado que revienta con un timeout de 30 s. Por eso usa el timeout
-   * pesado y por eso su resultado se cachea en SQLite.
+   * Solo sirve para descubrir personas, no para saber dónde están: este
+   * endpoint no trae `location`. La ubicación se pide con `getUser`.
    */
-  async getCampusLocations(campusId: number): Promise<ApiCampusLocation[]> {
-    return this.fetchAllPages<ApiCampusLocation>(`/campus/${campusId}/locations`, {
-      timeoutMs: this.heavyTimeoutMs,
-    })
-  }
-
-  /** `GET /v2/campus/:id/users`: el censo del campus, sin ubicación. */
   async getCampusUsers(campusId: number): Promise<ApiUser[]> {
     return this.fetchAllPages<ApiUser>(`/campus/${campusId}/users`)
   }
 
-  /** `GET /v2/users/:login`: el perfil público. */
+  /**
+   * `GET /v2/users/:login`: el perfil público, con su ubicación actual.
+   *
+   * Esta es la única fuente de ubicaciones que usamos. Se comprobó que para
+   * Madrid `GET /v2/campus/:id/locations` devuelve `X-Total: 751 077`, que es
+   * el histórico de todos los puestos desde siempre, no solo los de ahora, y
+   * que no admite filtro para quedarse con las activos: 7 511 páginas contra
+   * una cuota de 1200 peticiones por hora. Por usuario sale infinitamente más
+   * barato y además sale el dato fresco.
+   */
   async getUser(login: string): Promise<ApiUser> {
     return this.requestV2<ApiUser>(`/users/${encodeURIComponent(login)}`)
   }
@@ -190,8 +188,8 @@ export class FortyTwoClient {
         return collected
       }
 
-      // Cinturón de seguridad. `/locations` puede devolver un array gigante
-      // sin paginar en algún borde; sin tope, esto sería un bucle infinito.
+      // Cinturón de seguridad: si un endpoint devolviera un array gigante sin
+      // paginar en algún borde, sin tope esto sería un bucle infinito.
       if (collected.length > MAX_ITEMS) {
         return collected
       }

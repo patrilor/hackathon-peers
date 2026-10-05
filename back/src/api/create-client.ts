@@ -33,7 +33,6 @@ export function createApiClient(env: Env, fetchImpl: typeof fetch = fetch): Fort
     apiV2Base: env.apiV2Base,
     userAgent: env.FORTY_TWO_USER_AGENT,
     timeoutMs: 30_000,
-    heavyTimeoutMs: 120_000,
     pageSize: 100,
     limiter,
     tokens,
