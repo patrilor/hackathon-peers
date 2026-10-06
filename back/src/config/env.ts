@@ -177,6 +177,31 @@ const envSchema = z.object({
 
   /** Intentos antes de rendirse, sin contar el primero. */
   API_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+
+  // --- Campus --------------------------------------------------------------
+
+  /**
+   * Campus al que se limita la lista de compañeros (solo se guardan y se
+   * muestran alumnos suyos). 22 = Madrid.
+   *
+   * La API de 42 manda a **todo** el que tiene una fila en el proyecto, de
+   * cualquier campus, y la persona embebida en `projects_users` no trae campus.
+   * Para quedarse solo con el nuestro se cruza con el listado de miembros del
+   * campus (`/v2/campus/:id/users`), que se siembra en la caché con
+   * `npm run madrid:seed`.
+   */
+  CAMPUS_ID: z.coerce.number().int().positive().default(22),
+
+  /**
+   * Caducidad del directorio de logins del campus (quién es de Madrid), en
+   * segundos.
+   *
+   * La membresía cambia poco (piscinas, graduaciones), así que 12 horas son más
+   * que suficientes. Si caduca, el directorio **sigue filtrando** (es mejor un
+   * listado de hace unas horas que colar a gente de otros campus) y se re-siembra
+   * con `npm run madrid:seed`.
+   */
+  CAMPUS_DIRECTORY_TTL_SECONDS: z.coerce.number().int().positive().default(12 * 60 * 60),
 })
 
 /** Configuración normalizada: el entorno validado más lo derivado de él. */

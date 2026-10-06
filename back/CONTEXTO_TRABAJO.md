@@ -147,10 +147,74 @@ local. Sin él, Vite compila sin dirección de API a la que preguntar.
 
 ---
 
+## El filtro solo-Madrid
+
+El usuario pidió que la web solo muestre gente de 42 Madrid. La API manda a
+todo el mundo y la persona embebida en cada `projects_users` **no trae campus**
+(se comprobó: el campo no existe en `user`), así que no se puede filtrar con un
+`filter[campus_id]` ni leyendo el estudiante en el acto.
+
+### Cómo se filtra entonces
+
+Con un directorio del campus: el listado de `GET /v2/campus/:id/users` (el
+"members list" del campus), que con el scope `public` responde sin token de
+usuario. Sus logins son la única fuente de "quién es de aquí".
+
+- Un script lo baja una vez y lo guarda en la caché con la clave
+  `campus_directory:<id>`: `npm run madrid:seed` (`make madrid`). Son decenas de
+  páginas a 2 req/s (10-20 s en Madrid), por eso se hace una sola vez y dura
+  `CAMPUS_DIRECTORY_TTL_SECONDS` (12 h).
+- El filtro se aplica **dos veces de verdad**:
+  1. al **guardar** cada página de peers (`trimPage` ya solo persiste a los de
+     Madrid), y
+  2. al **leer** (`everyone.filter(esDeMadrid)`), para que una página cacheada
+     antes del filtro no se cuele aunque el despliegue se hiciera mal en el
+     orden correcto es cinturón y tirantes.
+- `totalParticipants` ya **no** es el `X-Total` de la API: ahora es cuántos del
+  campus hay entre las páginas que tenemos en caché. `complete`/`X-Partial`
+  sigue diciendo si faltan páginas por bajar. Es un cambio de contrato
+  (`docs/api.md`) que aún hay que contar al equipo.
+
+### Decisión: fallar cerrado, no abierto
+
+**Sin directorio sembrado, `/projects/:id/peers` responde 500 con aviso**
+(no filtrar colaría gente de otros campus). El error dice que se siembre con
+`npm run madrid:seed`. No hay fallback a "lo que haya": el peor caso para el
+plan es servir a quien no es de Madrid.
+
+### El directorio caducado sigue valiendo
+
+La lectura usa `cache.get` y, si caducó, `getStale`: un directorio de hace unas
+horas filtra igual que uno recién bajado. Mejor uno viejo que ninguno. Solo se
+deja de filtrar si no hay directorio en absoluto (el 500 de arriba).
+
+### Cómo se limpia y se reconstruye
+
+El orden importa: **primero se despliega el filtro**, y **después** se vacía lo
+viejo. Si se vacía antes del despliegue, la caché se repuebla con el mundo
+entero.
+
+```bash
+make flush-cache   # o: npm run cache:flush — borra TODA la caché
+make madrid        # o: npm run madrid:seed — siembra el directorio
+```
+
+`cache:flush` (distinto de `cache:purge`, que solo borra lo caducado) hace
+`DELETE FROM cache` y **conserva `availability`**: la próxima vez que alguien
+abra un proyecto, las páginas se bajan ya solo-Madrid. En producción (Turso),
+si no hay acceso, vale `turso db shell <bd> "DELETE FROM cache;"`.
+
+### Variables nuevas
+
+- `CAMPUS_ID` — campus al que se limita (22 = Madrid, default).
+- `CAMPUS_DIRECTORY_TTL_SECONDS` — caducidad del directorio (12 h, default).
+
+---
+
 ## Estado verificado
 
-- Backend: typecheck limpio, lint limpio, build correcto, **209 tests en verde**
-  (10 ficheros).
+- Backend: typecheck limpio, lint limpio, build correcto, **183 tests en verde**
+  (9 ficheros).
 - Front: `npm run build` correcto.
 - Local contra la API real, con la sesión de `albrodri`:
   - `/health` → 200
@@ -175,6 +239,8 @@ local. Sin él, Vite compila sin dirección de API a la que preguntar.
 
 ## Pendiente
 
+- [ ] Contar al equipo (y reflejar en `docs/api.md`) que `X-Total-Participants`
+      ahora son solo los del campus, no el total global de la API.
 - [ ] **Bloque 9 de `TODO.md`**: `Dockerfile`, `.dockerignore`, servicio
       systemd, Caddy con HTTPS, UptimeRobot contra `/health` y registrar
       `https://<dominio>/auth/callback`. Bloqueado hasta tener VM de Oracle ARM y

@@ -159,6 +159,20 @@ describe('configuración', () => {
       expect(env.USER_PROJECTS_TTL_SECONDS).toBe(1800)
     })
 
+    it('trae el campus por defecto (22 = Madrid) y un directorio de 12 h', () => {
+      const env = loadEnv(MINIMO)
+
+      expect(env.CAMPUS_ID).toBe(22)
+      expect(env.CAMPUS_DIRECTORY_TTL_SECONDS).toBe(12 * 60 * 60)
+    })
+
+    it('lee el campus y el TTL del directorio de las cadenas de entorno', () => {
+      const env = loadEnv({ ...MINIMO, CAMPUS_ID: '1', CAMPUS_DIRECTORY_TTL_SECONDS: '3600' })
+
+      expect(env.CAMPUS_ID).toBe(1)
+      expect(env.CAMPUS_DIRECTORY_TTL_SECONDS).toBe(3600)
+    })
+
     it('lee los números de las cadenas de entorno', () => {
       const env = loadEnv({ ...MINIMO, PAGE_SIZE: '50', PEERS_PAGE_BUDGET: '2' })
 

@@ -15,6 +15,8 @@ import { createProjectsService } from './projects.js'
 
 /** Lo que el servidor necesita saber para montar los servicios. */
 export type ServicesConfig = {
+  /** Campus al que se limita la lista de compañeros (22 = Madrid). */
+  campusId: number
   /** Páginas de peers que se descargan como mucho en una petición. */
   peersPageBudget: number
   /** Caducidad de las páginas de peers, en segundos. */
@@ -47,6 +49,7 @@ export function createServices(db: Db, client: FortyTwoClient, config: ServicesC
       cache: repositories.cache,
       availability: repositories.availability,
       client,
+      campusId: config.campusId,
       peersPageBudget: config.peersPageBudget,
       peersTtlSeconds: config.peersTtlSeconds,
       userProjectsTtlSeconds: config.userProjectsTtlSeconds,

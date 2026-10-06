@@ -9,6 +9,7 @@
  * | `user_projects:<login>`  | `[{ id, name }]` de lo que tiene en curso      | 30 min       |
  * | `peers:<id>:meta`        | `{ total, per_page, pages }`                  | 15 min       |
  * | `peers:<id>:p<n>`        | una página de participantes                   | 15 min       |
+ * | `campus_directory:<id>`  | logins de los miembros del campus             | 12 h         |
  *
  * Que los participantes vayan partido por páginas es lo que permite
  * racionar la descarga: la API va a 2 peticiones por segundo, así que bajarse
@@ -20,6 +21,10 @@
  * 25 campos por persona (`email`, `phone`, `wallet`, `correction_point`,
  * `data_erasure_date`…) y no hay ningún motivo para escribir en nuestra base lo
  * que la web no usa.
+ *
+ * El directorio del campus es la única entrada que no sale de una petición
+ * "por proyecto": es el listado de miembros del campus 22 (Madrid) con el que
+ * se filtra a los participantes, y lo siembra `npm run madrid:seed`.
  */
 
 import type { Db } from '../database.js'
@@ -107,7 +112,24 @@ export function createCacheRepository(db: Db) {
       await db.execute({ sql: 'DELETE FROM cache WHERE key LIKE ?', args: [`${prefix}%`] })
     },
 
-        /** Cuántas claves de un prefijo existen, estén caducadas o no. */
+    /**
+     * Borra la caché entera.
+     *
+     * Es el "reinicio" del plan de solo-Madrid: cuando cambian las reglas con
+     * las que se rellenó la caché (p. ej. el filtro de campus), las filas
+     * antiguas seguirían viviendo hasta caducar solas. Borrarlas de golpe hace
+     * que todo se reconstruya con la regla nueva. Lo usa `npm run cache:flush`.
+     *
+     * Conserva el resto de la base (`availability`): solo se toca la caché.
+     */
+    async clearAll(): Promise<number> {
+      const before = await count()
+      await db.execute('DELETE FROM cache')
+
+      return before
+    },
+
+         /** Cuántas claves de un prefijo existen, estén caducadas o no. */
     async countWithPrefix(prefix: string): Promise<number> {
       const result = await db.execute({
         sql: 'SELECT COUNT(*) AS total FROM cache WHERE key LIKE ?',
@@ -179,4 +201,15 @@ export function peersPageKey(projectId: number, page: number): string {
 /** Prefijo de todo lo que pertenece a un proyecto. */
 export function peersPrefix(projectId: number): string {
   return `peers:${projectId}:`
+}
+
+/**
+ * Clave del directorio de un campus: los logins de sus miembros.
+ *
+ * Lo escribe `npm run madrid:seed` y lo lee el servicio de compañeros para
+ * filtrar a "solo los de este campus". Ver `CAMPUS_ID` y
+ * `CAMPUS_DIRECTORY_TTL_SECONDS` en `config/env.ts`.
+ */
+export function campusDirectoryKey(campusId: number): string {
+  return `campus_directory:${campusId}`
 }

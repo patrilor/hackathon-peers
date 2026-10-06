@@ -144,6 +144,26 @@ describe('cliente de 42', () => {
       // de las 1 200 peticiones por hora para confirmar que no hay nada.
       expect(fake.calls).toHaveLength(1)
     })
+
+    it('recorre todas las páginas del directorio del campus y devuelve logins', async () => {
+      const { client, fake } = makeClient([
+        {
+          body: Array.from({ length: 100 }, (_, index) => ({ id: index, login: `mad-${index}` })),
+          headers: { 'x-total': '101', 'x-per-page': '100' },
+        },
+        { body: [{ id: 100, login: 'mad-100' }], headers: { 'x-total': '101' } },
+      ])
+
+      const logins = await client.fetchCampusLogins(22)
+
+      // Todo el directorio, no solo la primera página: es lo que alimenta el
+      // filtro solo-Madrid.
+      expect(logins).toHaveLength(101)
+      expect(logins[0]).toBe('mad-0')
+      expect(logins[100]).toBe('mad-100')
+      expect(fake.urls()[0]).toBe(`${BASE}/campus/22/users?page=1&per_page=100`)
+      expect(fake.urls()[1]).toContain('page=2')
+    })
   })
 
   describe('errores', () => {

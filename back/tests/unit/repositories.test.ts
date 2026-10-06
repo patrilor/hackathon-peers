@@ -13,6 +13,7 @@ import { closeDatabase, openDatabase } from '../../src/db/database.js'
 import type { Db } from '../../src/db/database.js'
 import { createAvailabilityRepository } from '../../src/db/repositories/availability.js'
 import {
+  campusDirectoryKey,
   createCacheRepository,
   peersMetaKey,
   peersPageKey,
@@ -178,6 +179,19 @@ describe('repositorios', () => {
       expect(await cache.getStale('peers:2689:p1')).toEqual([{ login: 'viejo' }])
     })
 
+    it('clearAll borra toda la caché sin tocar el resto de la base', async () => {
+      const cache = createCacheRepository(db)
+
+      await cache.set('peers:2689:p1', [{ login: 'a' }], 900)
+      await cache.set('user_projects:albrodri', [{ id: 1, name: 'p' }], 900)
+      // Disponibilidad NO va en la caché: el flush no puede borrarla.
+      await createAvailabilityRepository(db).set('albrodri', true)
+
+      expect(await cache.clearAll()).toBe(2)
+      expect(await cache.count()).toBe(0)
+      expect(await createAvailabilityRepository(db).get('albrodri')).toBe(true)
+    })
+
     it('getStale también lee lo que está vivo', async () => {
       const cache = createCacheRepository(db)
 
@@ -236,6 +250,7 @@ describe('repositorios', () => {
       // El prefijo de un proyecto incluye los dos puntos del final para no
       // confundirse con el prefijo de otro que empiece igual (`:p1` vs `:p12`).
       expect(peersPrefix(2689)).toBe('peers:2689:')
+      expect(campusDirectoryKey(22)).toBe('campus_directory:22')
     })
   })
 })

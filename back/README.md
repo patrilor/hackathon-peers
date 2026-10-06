@@ -49,6 +49,8 @@ atajos.
 | `npm run sync -- <login>`         | Sincroniza los datos de un usuario y sale.      |
 | `npm run sync -- <login> --force` | Ignora los checkpoints y rehace todo.           |
 | `npm run db:migrate`              | Aplica las migraciones pendientes.              |
+| `npm run cache:flush`             | Borra TODA la caché (el "reset" del solo-Madrid). |
+| `npm run madrid:seed`             | Baja el directorio del campus 22 y lo cachea.   |
 | `npm test`                        | Suite completa (218 tests).                     |
 | `npm run typecheck`               | `tsc --noEmit`.                                 |
 | `npm run lint`                    | ESLint.                                         |
@@ -69,6 +71,8 @@ variable por variable. Las que de verdad importan:
 | `DATABASE_PATH`                      | Fichero SQLite. Se crea solo.                                                   |
 | `CURSUS_ID`                          | Common Core = `21`, Madrid = `22`.                                              |
 | `SYNC_REQUESTS_PER_HOUR`             | Tope de peticiones a la API. Es el límite real de 42: pasarse da `429`.         |
+| `CAMPUS_ID`                          | Campus al que se limita la lista de compañeros. **22 = Madrid** (default).     |
+| `CAMPUS_DIRECTORY_TTL_SECONDS`       | Caducidad del directorio del campus (12 h, default).                           |
 
 ### Scopes de la app OAuth
 
@@ -197,6 +201,20 @@ todo el mundo aparecería "fuera del centro". Hay tests que lo fijan en
 Si la API falla, los servicios devuelven lo que haya en SQLite y anotan el fallo.
 La idea es que un fallo de 42 no se convierta en un fallo del back: mejor un dato
 de hace dos minutos que una pantalla de error.
+
+### Solo-Madrid
+
+La lista de compañeros solo guarda y muestra alumnos del campus `CAMPUS_ID`
+(22 = Madrid). La API manda a todo el mundo, así que se filtra contra un
+**directorio** del campus que se baja una sola vez con `npm run madrid:seed`
+(«members list» de `GET /v2/campus/:id/users`, ~10-20 s en Madrid).
+
+- Sin directorio, la lista responde 500 con aviso a propósito: no filtrar
+  colaría gente de otros campus. Detalle de por qué en
+  [`CONTEXTO_TRABAJO.md`](CONTEXTO_TRABAJO.md).
+- Si cambian las reglas, **primero** se despliega y **después**
+  `npm run cache:flush` (borra toda la caché, conserva `availability`) y
+  `npm run madrid:seed`: la nueva caché se llena ya solo-Madrid.
 
 ## Tests
 

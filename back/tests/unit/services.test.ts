@@ -14,7 +14,12 @@ import { createThrottle } from '../../src/api/throttle.js'
 import { closeDatabase, openDatabase } from '../../src/db/database.js'
 import type { Db } from '../../src/db/database.js'
 import { createAvailabilityRepository } from '../../src/db/repositories/availability.js'
-import { createCacheRepository, peersPageKey } from '../../src/db/repositories/cache.js'
+import {
+  campusDirectoryKey,
+  createCacheRepository,
+  peersMetaKey,
+  peersPageKey,
+} from '../../src/db/repositories/cache.js'
 import { createAvailabilityService } from '../../src/services/availability.js'
 import { createProjectsService } from '../../src/services/projects.js'
 import { ApiError } from '../../src/api/errors.js'
@@ -40,6 +45,25 @@ function entry(
     },
   }
 }
+
+/**
+ * Qué logins se consideran "de Madrid" en la mayoría de los tests.
+ *
+ * Son los nombres que usa el resto del fichero (`entry('paciente')` etc.),
+ * para que el filtro de campus no se coma a nadie de forma sorprendente. Los
+ * tests que prueban el filtro de verdad pasan el suyo.
+ */
+const DIRECTORIO_POR_DEFECTO = new Set([
+  'albrodri',
+  'jdoe',
+  'mgomez',
+  'paciente',
+  'aprobado-fuera',
+  'fuera-del-centro',
+  'guardia',
+  'fuera',
+  'nodata',
+])
 
 /** Cliente con un `fetch` que devuelve lo que se le diga, sin esperar de verdad. */
 function makeClient(
@@ -101,6 +125,7 @@ describe('servicios', () => {
         cache: createCacheRepository(db),
         availability: createAvailabilityRepository(db),
         client,
+        campusId: 22,
         peersPageBudget: 5,
         peersTtlSeconds: 900,
         userProjectsTtlSeconds: 1_800,
@@ -119,6 +144,7 @@ describe('servicios', () => {
         cache: createCacheRepository(db),
         availability: createAvailabilityRepository(db),
         client,
+        campusId: 22,
         peersPageBudget: 5,
         peersTtlSeconds: 900,
         userProjectsTtlSeconds: 1_800,
@@ -138,6 +164,7 @@ describe('servicios', () => {
         cache: createCacheRepository(db),
         availability: createAvailabilityRepository(db),
         client,
+        campusId: 22,
         peersPageBudget: 5,
         peersTtlSeconds: 900,
         userProjectsTtlSeconds: 1_800,
@@ -155,12 +182,21 @@ describe('servicios', () => {
   describe('compañeros', () => {
     function servicio(
       client: FortyTwoClient,
-      overrides: { peersPageBudget?: number; onUpstreamFailure?: (detail: string) => void } = {},
+      overrides: {
+        peersPageBudget?: number
+        onUpstreamFailure?: (detail: string) => void
+        /** Quiénes son de este campus. Por defecto, `DIRECTORIO_POR_DEFECTO`. */
+        madrid?: ReadonlySet<string>
+      } = {},
     ) {
       return createProjectsService({
         cache: createCacheRepository(db),
         availability: createAvailabilityRepository(db),
         client,
+        campusId: 22,
+        // El directorio va en memoria, no en la caché: aquí se prueba el filtro,
+        // no la sembradura (para eso están los tests con la caché de verdad).
+        loadCampusLogins: async () => overrides.madrid ?? DIRECTORIO_POR_DEFECTO,
         peersPageBudget: overrides.peersPageBudget ?? 5,
         peersTtlSeconds: 900,
         userProjectsTtlSeconds: 1_800,
@@ -289,6 +325,17 @@ describe('servicios', () => {
         }
       }
 
+      /** Todos los `user-<página>-<índice>` del proyecto grande, de nuestro campus. */
+      function directorioGrande(): Set<string> {
+        const logins = new Set<string>()
+        for (let page = 1; page <= 21; page += 1) {
+          for (let index = 0; index < 100; index += 1) {
+            logins.add(`user-${page}-${index}`)
+          }
+        }
+        return logins
+      }
+
       it('no descarga más páginas de las que permite el presupuesto', async () => {
         let pedidas = 0
         const { client } = makeClient((url) => {
@@ -296,7 +343,10 @@ describe('servicios', () => {
           return proyectoGrande()(url)
         })
 
-        const result = await servicio(client, { peersPageBudget: 3 }).findPeers(2689)
+        const result = await servicio(client, {
+          peersPageBudget: 3,
+          madrid: directorioGrande(),
+        }).findPeers(2689)
 
         // La página 1 sale Establishing los metadatos, más 3 del presupuesto.
         expect(pedidas).toBe(4)
@@ -308,7 +358,10 @@ describe('servicios', () => {
       it('avisa de que la lista está incompleta, para que el front lo diga', async () => {
         const { client } = makeClient(proyectoGrande())
 
-        const result = await servicio(client, { peersPageBudget: 2 }).findPeers(2689)
+        const result = await servicio(client, {
+          peersPageBudget: 2,
+          madrid: directorioGrande(),
+        }).findPeers(2689)
 
         // 2 100 participantes son 21 páginas: con 2 no está completa, y `X-Partial`
         // en la respuesta sale de aquí.
@@ -323,7 +376,7 @@ describe('servicios', () => {
           return proyectoGrande()(url)
         })
 
-        const service = servicio(client, { peersPageBudget: 4 })
+        const service = servicio(client, { peersPageBudget: 4, madrid: directorioGrande() })
 
         await service.findPeers(2689)
         const trasPrimera = pedidas
@@ -339,10 +392,120 @@ describe('servicios', () => {
       it('con presupuesto alto, la primera respuesta ya sale completa', async () => {
         const { client } = makeClient(proyectoGrande())
 
-        const result = await servicio(client, { peersPageBudget: 21 }).findPeers(2689)
+        const result = await servicio(client, {
+          peersPageBudget: 21,
+          madrid: directorioGrande(),
+        }).findPeers(2689)
 
         expect(result.complete).toBe(true)
         expect(result.pages).toEqual({ cached: 21, total: 21 })
+      })
+    })
+
+    describe('filtro por campus (solo Madrid)', () => {
+      /**
+       * Servicio con el directorio de la caché de verdad, como en producción:
+       * sin sembrar (`npm run madrid:seed`) tiene que fallar con aviso.
+       */
+      function servicioConCaché(client: FortyTwoClient) {
+        return createProjectsService({
+          cache: createCacheRepository(db),
+          availability: createAvailabilityRepository(db),
+          client,
+          campusId: 22,
+          peersPageBudget: 5,
+          peersTtlSeconds: 900,
+          userProjectsTtlSeconds: 1_800,
+        })
+      }
+
+      it('solo muestra y cuenta a quienes son del campus', async () => {
+        const { client } = makeClient(() => ({
+          body: [entry('madrilenio'), entry('foraneo')],
+          headers: { 'x-total': '2', 'x-per-page': '100' },
+        }))
+
+        const result = await servicio(client, { madrid: new Set(['madrilenio']) }).findPeers(2689)
+
+        expect(result.peers.map((peer) => peer.login)).toEqual(['madrilenio'])
+        expect(result.totalParticipants).toBe(1)
+      })
+
+      it('el total de participantes cuenta el campus, no el X-Total global de la 42', async () => {
+        const { client } = makeClient(() => ({
+          body: [entry('madrilenio'), entry('foraneo', { status: 'finished' })],
+          headers: { 'x-total': '99', 'x-per-page': '100' },
+        }))
+
+        const result = await servicio(client, { madrid: new Set(['madrilenio']) }).findPeers(2689)
+
+        // La API dice 99 participantes, pero solo es de aquí quien está en el
+        // directorio: el número no puede mentir sobre quién está en el campus.
+        expect(result.totalParticipants).toBe(1)
+      })
+
+      it('una página entera de foráneos no cuenta como participantes', async () => {
+        const { client } = makeClient(() => ({
+          body: [entry('foraneo-1'), entry('foraneo-2')],
+          headers: { 'x-total': '2', 'x-per-page': '100' },
+        }))
+
+        const result = await servicio(client, { madrid: new Set([]) }).findPeers(2689)
+
+        expect(result.peers).toEqual([])
+        expect(result.totalParticipants).toBe(0)
+      })
+
+      it('falla con aviso si el directorio no está sembrado', async () => {
+        const { client } = makeClient(() => ({ body: [] }))
+
+        // Sin `campus_directory:22` no hay manera de saber quién es de aquí, y
+        // no filtrar colaría a gente de otros campus: mejor 500 con aviso.
+        await expect(servicioConCaché(client).findPeers(2689)).rejects.toThrow(/madrid:seed/)
+      })
+
+      it('sigue filtrando con un directorio caducado', async () => {
+        // TTL negativo: caducó. El `get` lo da por perdido, pero el servicio
+        // cae a `getStale` porque un directorio de hace unas horas filtra
+        // mejor que ninguno.
+        await createCacheRepository(db).set(campusDirectoryKey(22), ['madrilenio'], -1)
+
+        const { client } = makeClient(() => ({
+          body: [entry('madrilenio'), entry('foraneo')],
+          headers: { 'x-total': '2', 'x-per-page': '100' },
+        }))
+
+        const result = await servicioConCaché(client).findPeers(2689)
+
+        expect(result.peers.map((peer) => peer.login)).toEqual(['madrilenio'])
+        expect(result.totalParticipants).toBe(1)
+      })
+
+      it('una página cacheada antes del filtro no cuela a foráneos al leerla', async () => {
+        const cache = createCacheRepository(db)
+        await cache.set(campusDirectoryKey(22), ['madrilenio'], 900)
+        // Página "vieja", guardada cuando no había filtro: trae a un foráneo.
+        await cache.set(
+          peersMetaKey(2689),
+          { total: 2, perPage: 100, pages: 1, name: 'Call Me Maybe' },
+          900,
+        )
+        await cache.set(
+          peersPageKey(2689, 1),
+          [
+            { login: 'foraneo', image: null, location: null, status: 'in_progress' },
+            { login: 'madrilenio', image: null, location: null, status: 'in_progress' },
+          ],
+          900,
+        )
+
+        const { client } = makeClient(() => ({ body: [] }))
+        const result = await servicioConCaché(client).findPeers(2689)
+
+        // Cinto y tirantes: aunque la fila estuviera ahí, al leerla se vuelve a
+        // filtrar y el foráneo no aparece.
+        expect(result.peers.map((peer) => peer.login)).toEqual(['madrilenio'])
+        expect(result.totalParticipants).toBe(1)
       })
     })
 

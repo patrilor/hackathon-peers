@@ -15,6 +15,7 @@
  * | `/v2/projects`                          | **No se usa.** El catálogo son 1 702 proyectos (18 páginas) y no lo necesita nadie. |
  * | `/v2/projects/:id/users`                | Participantes sin estado. **No se usa.** |
  * | `/v2/campus/:id/locations`              | DESCARTADO: histórico completo, inviable. |
+ * | `/v2/campus/:id/users`                  | Listado de miembros del campus. Solo lo usa el sembrador del directorio. |
  * | `?filter[project_id]=a,b`               | Solo devuelve los del primer id (comprobado: 100 entradas, todas de `2689`). Un proyecto por petición. |
  *
  * Lo más importante de este cliente es que `getProjectParticipantsPage` devuelve
@@ -28,7 +29,7 @@
 import type { AppTokenProvider } from './app-token.js'
 import type { Throttle } from './throttle.js'
 import { ApiError, apiErrorFromNetwork, apiErrorFromResponse, endpointFromUrl } from './errors.js'
-import type { ApiProjectUser } from '../domain/types.js'
+import type { ApiProjectUser, ApiUser } from '../domain/types.js'
 
 /** Configuración del cliente. */
 export type FortyTwoClientOptions = {
@@ -141,6 +142,25 @@ export class FortyTwoClient {
    */
   async getUserProjects(login: string): Promise<ApiProjectUser[]> {
     return this.fetchAllPages<ApiProjectUser>(`/users/${encodeURIComponent(login)}/projects_users`)
+  }
+
+  /**
+   * `GET /v2/campus/:id/users`, entero: los logins de los miembros del campus.
+   *
+   * Es el "directorio de Madrid" con el que se filtran los participantes de un
+   * proyecto, que la API manda de **todo** el mundo. No se usa en cada
+   * petición: lo descarga el sembrador (`scripts/seed-madrid.ts`) y se guarda
+   * en la caché con un TTL largo, porque una sola pasada son decenas de
+   * peticiones a 2 por segundo.
+   *
+   * Lo que devuelve este endpoint es el usuario *reducido* (login, imagen…),
+   * pero `ApiUser` vale igual: solo leemos `login`.
+   */
+  async fetchCampusLogins(campusId: number): Promise<string[]> {
+    const users = await this.fetchAllPages<ApiUser>(`/campus/${campusId}/users`)
+    const logins = users.map((user) => user.login).filter((login) => typeof login === 'string')
+
+    return logins
   }
 
   // --- Paginación ---------------------------------------------------------

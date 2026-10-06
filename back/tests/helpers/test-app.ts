@@ -10,6 +10,7 @@ import type { BuiltApp } from '../../src/app.js'
 import { loadEnv } from '../../src/config/env.js'
 import { closeDatabase, openDatabase } from '../../src/db/database.js'
 import type { Env } from '../../src/config/env.js'
+import { campusDirectoryKey } from '../../src/db/repositories/cache.js'
 
 /** Entorno válido, con lo único que no se puede inventar siendo parametrizado. */
 export function makeEnv(overrides: Partial<NodeJS.ProcessEnv> = {}): Env {
@@ -270,6 +271,16 @@ export async function makeApp(
   // del orden de ejecución.
   const db = await openDatabase({ url: 'file::memory:' })
   const built = await buildApp({ env, db, fetchImpl: provider.fetchImpl })
+
+  // Directorio del campus ya sembrado, como en un despliegue que ha pasado por
+  // `npm run madrid:seed`: sin él, el servicio de compañeros responde 500 a
+  // propósito. Se siembra aquí para que los tests de integración no dependan de
+  // sembrar cada uno, y con los logins que conoce el proveedor simulado.
+  await built.services.repositories.cache.set(
+    campusDirectoryKey(env.CAMPUS_ID),
+    ['albrodri', 'jdoe', 'mgomez'],
+    env.CAMPUS_DIRECTORY_TTL_SECONDS,
+  )
 
   async function login(): Promise<string> {
     const start = await built.app.inject({ method: 'GET', url: '/auth/login' })

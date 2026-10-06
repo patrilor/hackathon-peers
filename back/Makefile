@@ -9,6 +9,8 @@
 #   make check      Typecheck + lint + tests + build
 #   make cache      Qué hay en la base de datos ahora mismo
 #   make purge-cache
+#   make flush-cache
+#   make madrid     Siembra el directorio del campus (solo-Madrid)
 #
 # No hay `make sync`: ya no hay réplica. La caché se llena sola, proyecto a
 # proyecto, a medida que alguien lo abre.
@@ -76,11 +78,20 @@ cache:
 purge-cache:
 	@npm run cache:purge
 
+## flush-cache: borra TODA la caché (para reconstruirla solo-Madrid)
+flush-cache:
+	@npm run cache:flush
+
+## madrid: siembra el directorio del campus (22=Madrid) para filtrar compañeros
+madrid:
+	@npm run madrid:seed
+
 ## reset: borra la base de datos y la vuelve a crear vacía
 reset:
 	@rm -rf data/
 	@$(MAKE) --no-print-directory migrate
-	@echo "  Base de datos vacía. Se llenará sola al abrir un proyecto."
+	@echo "  Base de datos vacía. Siémbrala con \`make madrid\` (el directorio de"
+	@echo "  Madrid) y se llenará sola al abrir un proyecto."
 
 # ── Probar ────────────────────────────────────────────────────────────────────
 
@@ -128,6 +139,6 @@ help:
 	@echo ""
 
 .PHONY: up install env migrate dev start \
-        cache purge-cache reset \
+        cache purge-cache flush-cache madrid reset \
         check typecheck lint test build ping \
         clean help

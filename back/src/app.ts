@@ -150,6 +150,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<BuiltApp> {
   }
 
   const services = createServices(db, client, {
+    campusId: env.CAMPUS_ID,
     peersPageBudget: env.PEERS_PAGE_BUDGET,
     peersTtlSeconds: env.PEERS_TTL_SECONDS,
     userProjectsTtlSeconds: env.USER_PROJECTS_TTL_SECONDS,

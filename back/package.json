@@ -21,7 +21,9 @@
     "test:coverage": "vitest run --coverage",
     "db:migrate": "tsx --env-file=.env scripts/migrate-once.ts",
     "db:cache": "tsx --env-file=.env scripts/cache-info.ts",
-    "cache:purge": "tsx --env-file=.env scripts/purge-cache.ts"
+    "cache:purge": "tsx --env-file=.env scripts/purge-cache.ts",
+    "cache:flush": "tsx --env-file=.env scripts/flush-cache.ts",
+    "madrid:seed": "tsx --env-file=.env scripts/seed-madrid.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",

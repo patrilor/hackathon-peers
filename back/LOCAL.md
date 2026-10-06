@@ -20,6 +20,7 @@ En otra terminal, para tener datos:
 make sync    # replica la 42 en local (tarda varios minutos la primera vez)
 make data    # dice qué se ha replicado
 make session # cookie de prueba para curl, sin navegador
+make madrid  # siembra el directorio del campus (solo pasarán de Madrid)
 make check   # typecheck + lint + tests + build
 ```
 
@@ -224,6 +225,34 @@ nada. Para rehacerlo todo:
 npm run sync -- albrodri --force
 ```
 
+### El directorio del campus (solo-Madrid)
+
+Para que la lista de compañeros solo muestre gente de 42 Madrid hace falta un
+directorio del campus: el listado de `GET /v2/campus/:id/users` («members
+list»), sin el cual no se sabe quién es de aquí. Se baja una sola vez y se
+cachea:
+
+```bash
+make madrid     # o npm run madrid:seed — baja el directorio (10-20 s) y lo cachea 12 h
+```
+
+**Sin directorio sembrado, `/projects/:id/peers` responde 500 con aviso**, de
+propósito: no filtrar colaría gente de otros campuses. El error dice qué
+comando hay que lanzar. Un directorio caducado sigue filtrando igualmente
+(mejor uno de hace horas que ninguno).
+
+Si las reglas cambian (el caso que ya hemos vivido: desplegar el filtro cuando
+las páginas guardadas traían a todo el mundo), el orden es **desplegar primero y
+vaciar después**:
+
+```bash
+make flush-cache    # o npm run cache:flush — borra TODA la caché, conserva availability
+make madrid         # se vuelve a sembrar el directorio
+```
+
+`make reset` también deja la caché vacía (borra `data/` entero), pero se lleva
+por delante `availability`; `make flush-cache` solo toca la tabla de caché.
+
 ### Ver qué hay dentro
 
 ```bash
@@ -263,6 +292,9 @@ Los atajos de `make` no sustituyen a los scripts de npm: cada objetivo del
 | `npm run sync -- <login>` | Sincroniza una persona y sus proyectos. |
 | `npm run sync -- <login> --force` | Igual, pero ignorando los checkpoints. |
 | `npm run db:migrate` | Aplica las migraciones pendientes. |
+| `npm run cache:purge` | Borra solo lo caducado de la caché. |
+| `npm run cache:flush` | Borra TODA la caché (el reset del solo-Madrid). |
+| `npm run madrid:seed` | Baja y cachea el directorio del campus. |
 | `npm test` | Suite completa. |
 | `npm run typecheck` | `tsc --noEmit`. |
 | `npm run lint` | ESLint. |
@@ -276,6 +308,9 @@ Y los objetivos del `Makefile`:
 | `make install` | `npm ci`, o nada si ya está al día. |
 | `make env` | Copia `.env.example` a `.env` si no existe, y avisa de qué rellenar. |
 | `make migrate` | `npm run db:migrate`. |
+| `make purge-cache` | Borra solo lo caducado de la caché. |
+| `make flush-cache` | Borra TODA la caché (reconstruir solo-Madrid). |
+| `make madrid` | Siembra el directorio del campus (22 = Madrid). |
 | `make dev` / `make start` | Servidor en modo desarrollo / compilado. |
 | `make sync` | `npm run sync -- <login> --force`. |
 | `make sync-fast` | Lo mismo respetando los checkpoints: no hace casi nada. |
