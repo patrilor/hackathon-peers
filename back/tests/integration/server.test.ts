@@ -20,9 +20,14 @@ import type { TestApp } from '../helpers/test-app.js'
 
 const apps: TestApp[] = []
 
-/** App nueva, registrada para poder cerrarla al final del test. */
-function app(...args: Parameters<typeof makeApp>): TestApp {
-  const built = makeApp(...args)
+/**
+ * App nueva, registrada para poder cerrarla al final del test.
+ *
+ * Es `async` porque abrir la base con `@libsql/client` y aplicar las migraciones
+ * lo son: cada test levanta su propia app, montada y migrada.
+ */
+async function app(...args: Parameters<typeof makeApp>): Promise<TestApp> {
+  const built = await makeApp(...args)
   apps.push(built)
   return built
 }
@@ -40,7 +45,7 @@ function asSession(cookie: string): { cookie: string } {
 
 describe('salud', () => {
   it('GET /health responde 200 sin tocar nada', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({ method: 'GET', url: '/health' })
 
@@ -51,7 +56,7 @@ describe('salud', () => {
 
 describe('autenticación', () => {
   it('GET /auth/login redirige a la 42 con state y cookie', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({ method: 'GET', url: '/auth/login' })
 
@@ -65,7 +70,7 @@ describe('autenticación', () => {
   })
 
   it('la cookie de sesión va httpOnly, secure y SameSite=Lax', async () => {
-    const built = app()
+    const built = await app()
 
     const start = await built.app.inject({ method: 'GET', url: '/auth/login' })
     const callback = await built.app.inject({
@@ -90,7 +95,7 @@ describe('autenticación', () => {
   })
 
   it('el login completo acaba redirigiendo al front sin query de error', async () => {
-    const built = app()
+    const built = await app()
     const start = await built.app.inject({ method: 'GET', url: '/auth/login' })
     const state = new URL(String(start.headers.location)).searchParams.get('state') ?? ''
 
@@ -105,7 +110,7 @@ describe('autenticación', () => {
   })
 
   it('GET /auth/me devuelve la persona de la sesión', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -117,12 +122,14 @@ describe('autenticación', () => {
     expect(response.statusCode).toBe(200)
     expect(json(response) as CurrentUser).toEqual({
       login: 'albrodri',
-      image: 'https://img/1.png',
+      name: null,
+      // La sesión guarda la URL ya resuelta desde `image.versions.medium`.
+      image: 'https://img/1-medium.png',
     })
   })
 
   it('GET /auth/me da 401 sin sesión', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({ method: 'GET', url: '/auth/me' })
 
@@ -131,7 +138,7 @@ describe('autenticación', () => {
   })
 
   it('GET /auth/me da 401 con una cookie inventada', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({
       method: 'GET',
@@ -142,8 +149,8 @@ describe('autenticación', () => {
     expect(response.statusCode).toBe(401)
   })
 
-  it('POST /auth/logout borra la sesión y responde 204', async () => {
-    const built = app()
+  it('POST /auth/logout vacía la cookie de sesión y responde 204', async () => {
+    const built = await app()
     const cookie = await built.login()
 
     const logout = await built.app.inject({
@@ -153,17 +160,20 @@ describe('autenticación', () => {
     })
     expect(logout.statusCode).toBe(204)
 
-    // Y la cookie ya no vale, aunque el navegador la siga mandando.
-    const after = await built.app.inject({
-      method: 'GET',
-      url: '/auth/me',
-      headers: asSession(cookie),
-    })
-    expect(after.statusCode).toBe(401)
+    // No hay tabla de sesiones: el logout es mandar la misma cookie con
+    // `Max-Age=0` para que el navegador la borre. Por eso no lleva la sesión
+    // en la respuesta, solo la orden de borrarla.
+    const setCookie = logout.headers['set-cookie']
+    const cookies = Array.isArray(setCookie) ? setCookie.map(String) : [String(setCookie)]
+    const borrada = cookies.find((cookie) => cookie.includes('__Host-sanatorio_session='))
+
+    expect(borrada).toBeDefined()
+    expect(borrada).toContain('Max-Age=0')
+    expect(borrada).toContain('HttpOnly')
   })
 
   it('un callback sin code va al front con el error', async () => {
-    const built = app()
+    const built = await app()
     const start = await built.app.inject({ method: 'GET', url: '/auth/login' })
 
     const response = await built.app.inject({
@@ -178,7 +188,7 @@ describe('autenticación', () => {
   })
 
   it('un callback con state plantado va al front con el error', async () => {
-    const built = app()
+    const built = await app()
     const start = await built.app.inject({ method: 'GET', url: '/auth/login' })
 
     const response = await built.app.inject({
@@ -195,7 +205,7 @@ describe('autenticación', () => {
 
 describe('proyectos', () => {
   it('GET /me/projects devuelve los proyectos en curso', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -209,7 +219,7 @@ describe('proyectos', () => {
   })
 
   it('GET /me/projects da 401 sin sesión', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({ method: 'GET', url: '/me/projects' })
 
@@ -217,7 +227,7 @@ describe('proyectos', () => {
   })
 
   it('GET /me/projects devuelve [] si no hay nada en curso', async () => {
-    const built = app({}, { routes: { '/v2/users/albrodri/projects_users': [] } })
+    const built = await app({}, { routes: { '/v2/users/albrodri/projects_users': [] } })
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -233,7 +243,7 @@ describe('proyectos', () => {
 
 describe('compañeros', () => {
   it('GET /projects/:id/peers devuelve la lista sin quien pregunta', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -249,7 +259,7 @@ describe('compañeros', () => {
   })
 
   it('cada peer trae login, location, available y status', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -272,7 +282,7 @@ describe('compañeros', () => {
   })
 
   it('un id que no es un número da 400, no 500', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -287,7 +297,7 @@ describe('compañeros', () => {
   })
 
   it('un proyecto desconocido da 404', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -301,7 +311,7 @@ describe('compañeros', () => {
   })
 
   it('sin sesión da 401', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({ method: 'GET', url: '/projects/10/peers' })
 
@@ -311,7 +321,7 @@ describe('compañeros', () => {
 
 describe('disponibilidad', () => {
   it('PUT /me/availability guarda y devuelve el valor', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -333,7 +343,7 @@ describe('disponibilidad', () => {
   })
 
   it('un body inválido da 400', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -348,7 +358,7 @@ describe('disponibilidad', () => {
   })
 
   it('GET da false si nunca se ha marcado', async () => {
-    const built = app()
+    const built = await app()
     const cookie = await built.login()
 
     const response = await built.app.inject({
@@ -361,7 +371,7 @@ describe('disponibilidad', () => {
   })
 
   it('sin sesión da 401', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({
       method: 'PUT',
@@ -375,7 +385,7 @@ describe('disponibilidad', () => {
 
 describe('CORS', () => {
   it('devuelve las cabeceras del origen permitido, con credenciales', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({
       method: 'GET',
@@ -390,7 +400,7 @@ describe('CORS', () => {
   })
 
   it('no devuelve cabeceras para un origen que no está en la lista', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({
       method: 'GET',
@@ -402,7 +412,7 @@ describe('CORS', () => {
   })
 
   it('responde al preflight sin credenciales duplicadas', async () => {
-    const built = app()
+    const built = await app()
 
     const response = await built.app.inject({
       method: 'OPTIONS',

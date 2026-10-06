@@ -3,6 +3,13 @@ import { defineConfig } from 'eslint/config'
 import tseslint from 'typescript-eslint'
 
 /**
+ * Las reglas type-checked solo se aplican a TypeScript: necesitan tipos, y un
+ * `.js` que no está en ningún tsconfig no los tiene. Sin este filtro, ESLint
+ * aborta con "rule requires type information" en cuanto aparece un `.js`.
+ */
+const soloTs = (configs) => configs.map((config) => ({ ...config, files: ['**/*.ts'] }))
+
+/**
  * ESLint plano: los 4 pasos que exigimos a todo el código del backend.
  *
  * 1. type-checked: los errores de tipos se ven en el lint, no al compilar.
@@ -15,9 +22,10 @@ export default defineConfig(
     ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'data/**'],
   },
   js.configs.recommended,
-  ...tseslint.configs.strictTypeChecked,
-  ...tseslint.configs.stylisticTypeChecked,
+  ...soloTs(tseslint.configs.strictTypeChecked),
+  ...soloTs(tseslint.configs.stylisticTypeChecked),
   {
+    files: ['**/*.ts'],
     languageOptions: {
       parserOptions: {
         projectService: {

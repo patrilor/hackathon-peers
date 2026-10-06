@@ -10,8 +10,6 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { openDatabase } from '../../src/db/database.js'
-import { createUsersRepository } from '../../src/db/repositories/users.js'
 import { ApiError } from '../../src/api/errors.js'
 import { DomainError } from '../../src/domain/errors.js'
 import { createAuthService } from '../../src/auth/auth-service.js'
@@ -95,7 +93,17 @@ function makeProvider(
           login: 'albrodri',
           kind: 'student',
           usual_full_name: 'Alberto',
-          image: { url: 'https://img/1.png' },
+          // La forma real de la 42: `image` no es una URL, es un objeto con
+          // `link` y cuatro tamaños. Verificado contra `GET /v2/users/<login>`.
+          image: {
+            link: 'https://img/1.png',
+            versions: {
+              large: 'https://img/1-large.png',
+              medium: 'https://img/1-medium.png',
+              small: 'https://img/1-small.png',
+              micro: 'https://img/1-micro.png',
+            },
+          },
         },
       ),
       { status: 200 },
@@ -107,8 +115,6 @@ function makeProvider(
 
 /** Servicio montado, con la base en memoria y el reloj controlable. */
 function makeAuth(overrides: Parameters<typeof makeProvider>[0] = {}) {
-  const db = openDatabase(':memory:')
-  const users = createUsersRepository(db)
   const clock = makeClock()
   const provider = makeProvider(overrides)
 
@@ -117,21 +123,21 @@ function makeAuth(overrides: Parameters<typeof makeProvider>[0] = {}) {
     tokenUrl: 'https://api.test/oauth/token',
     clientId: 'u-test',
     clientSecret: 's-test',
-    redirectUri: 'https://back.test/auth/callback',
+    redirectUri: 'https://back.test/api/auth/callback',
     userAgent: 'sanatorio-42-test/1.0',
     fetchImpl: provider.fetchImpl,
   })
 
+  // Sin base de datos: la sesión va dentro de la cookie firmada, así que aquí no
+  // hay nada que abrir ni que migrar.
   const auth = createAuthService({
-    db,
-    users,
     oauth,
     secret: SECRET,
     frontendUrl: 'https://front.test',
     now: clock.now,
   })
 
-  return { auth, users, clock, requests: provider.requests }
+  return { auth, clock, requests: provider.requests }
 }
 
 /** Login completo, como lo haría un navegador. */
@@ -299,58 +305,72 @@ describe('ciclo de login', () => {
     const { result } = await login(auth)
 
     expect(result.login).toBe('albrodri')
-    expect(result.image).toBe('https://img/1.png')
+    // Sale el tamaño `medium`, no `link`: es el que se ve bien a 48 px y no
+    // gasta la foto entera en móvil.
+    expect(result.image).toBe('https://img/1-medium.png')
     expect(result.redirectUrl).toBe('https://front.test')
   })
 
-  it('replica a la persona, para que `sessions` no choca con la FK', async () => {
-    const { auth, users } = makeAuth()
-
-    await login(auth)
-
-    expect(users.findByLogin('albrodri')?.user_id).toBe(1)
-  })
-
-  it('la cookie de sesión NO lleva el token de 42', async () => {
+  it('la cookie de sesión lleva el perfil, no el token de 42', async () => {
     const { auth } = makeAuth()
 
     const { result } = await login(auth)
-    const sessionId = verify(SECRET, result.sessionCookie)
+    const payload = verify(SECRET, result.sessionCookie)
 
-    // Solo el identificador. El token se queda en la base.
-    expect(sessionId).toBe(result.sessionId)
+    // Antes la cookie llevaba un identificador opaco y el token se guardaba en la
+    // base. Ahora lleva el perfil firmado, y el token de 42 no se guarda en
+    // ninguna parte: se tira después de leer `/v2/me`.
+    const decoded = JSON.parse(
+      Buffer.from(String(payload), 'base64url').toString('utf8'),
+    ) as Record<string, unknown>
+
+    expect(decoded.login).toBe('albrodri')
+    expect(decoded.image).toBe('https://img/1-medium.png')
+    expect(typeof decoded.exp).toBe('number')
     expect(result.sessionCookie).not.toContain('token-de-usuario')
   })
 
-  it('lee la persona de la sesión', async () => {
+  it('lee la persona de la sesión sin tocar nada más', async () => {
     const { auth } = makeAuth()
     const { result } = await login(auth)
 
     const current = auth.currentUser(result.sessionCookie)
 
     expect(current.login).toBe('albrodri')
-    expect(current.accessToken).toBe('token-de-usuario')
+    expect(current.name).toBe('Alberto')
+    expect(current.image).toBe('https://img/1-medium.png')
   })
 
-  it('cierra la sesión de verdad: la cookie deja de servir', async () => {
+  it('no acepta una sesión firmada con otro secreto', async () => {
+    const { auth } = makeAuth()
+
+    // Suplantar a alguien es tan fácil como cambiar una letra de la cookie, si la
+    // firma no está.
+    const falsificada = sign('otro-secreto', 'inventado')
+
+    expect(() => auth.currentUser(falsificada)).toThrow(DomainError)
+  })
+
+  it('devuelve undefined en vez de lanzar cuando solo se pregunta', () => {
+    const { auth } = makeAuth()
+
+    // `readSession` es para uso interno y no ha de romper al llamador.
+    expect(auth.readSession(undefined)).toBeUndefined()
+    expect(auth.readSession('no-es-una-cookie')).toBeUndefined()
+  })
+
+  it('logout no necesita cookie: la cookie es la sesión', async () => {
     const { auth } = makeAuth()
     const { result } = await login(auth)
 
-    auth.logout(result.sessionCookie)
+    // No hay servidor al que avisar. Vaciar la cookie es todo el logout, así que
+    // la firma no tiene que llevar nada.
+    auth.logout()
 
-    expect(() => auth.currentUser(result.sessionCookie)).toThrow(DomainError)
-    expect(auth.sessions.count()).toBe(0)
-  })
-
-  it('cerrar dos veces no es un error', async () => {
-    const { auth } = makeAuth()
-    const { result } = await login(auth)
-
-    auth.logout(result.sessionCookie)
-
-    expect(() => {
-      auth.logout(result.sessionCookie)
-    }).not.toThrow()
+    // Y no hay estado que limpiar: una copia de la cookie seguiría siendo válida
+    // hasta que caduque, que es el compromiso de no tener sesiones revocables.
+    expect(() => auth.currentUser(result.sessionCookie)).not.toThrow()
+    expect(auth.readSession(result.sessionCookie)?.login).toBe('albrodri')
   })
 })
 
@@ -434,36 +454,63 @@ describe('lo que debe fallar', () => {
     expect(() => auth.currentUser(sign('otro-secreto', 'inventado'))).toThrow(DomainError)
   })
 
-  it('una sesión caducada no vale, y se limpia al leerla', async () => {
+  it('una sesión caducada no vale, aunque la cookie siga ahí', async () => {
     const { auth, clock } = makeAuth()
     const { result } = await login(auth)
 
-    // La sesión vive lo que el token: 3600 s en el proveedor simulado.
-    clock.advance(3601 * 1000)
+    // 12 h de vida por defecto; se pasa un poco más.
+    clock.advance(12 * 60 * 60 * 1000 + 1_000)
 
     expect(() => auth.currentUser(result.sessionCookie)).toThrow(DomainError)
-    // Se borró al leerla: no se acumulan sesiones muertas.
-    expect(auth.sessions.count()).toBe(0)
   })
 
-  it('nunca vive más que el token de 42', async () => {
+  it('la caducidad la trae firmada, no solo en el Max-Age de la cookie', async () => {
     const { auth, clock } = makeAuth()
     const { result } = await login(auth)
 
-    const session = auth.readSession(result.sessionCookie)
+    const payload = JSON.parse(
+      Buffer.from(String(verify(SECRET, result.sessionCookie)), 'base64url').toString('utf8'),
+    ) as { exp: number }
 
-    expect(session?.expiresAt).toBeLessThanOrEqual(clock.now() + 3600 * 1000)
+    // El `exp` va dentro del valor firmado: alguien que reescriba el `Max-Age` de
+    // la cookie a mano no gana nada, porque el servidor lo comprueba igual.
+    expect(payload.exp).toBe(clock.now() + 12 * 60 * 60 * 1000)
   })
 
-  it('purga las sesiones caducadas', async () => {
-    const { auth, clock } = makeAuth()
-    await login(auth)
-    await login(auth)
+  it('no acepta un payload sin `exp`', async () => {
+    const { auth } = makeAuth()
 
-    expect(auth.sessions.count()).toBe(2)
+    // Cookie firmada correctamente pero sin caducidad: no se puede aceptar, o
+    // sería una sesión eterna firmada por accidente.
+    const sinCaducidad = sign(SECRET, Buffer.from(JSON.stringify({ login: 'albrodri' })).toString('base64url'))
 
-    clock.advance(3601 * 1000)
-    expect(auth.purgeExpiredSessions()).toBe(2)
-    expect(auth.sessions.count()).toBe(0)
+    expect(auth.readSession(sinCaducidad)).toBeUndefined()
+  })
+
+  it('no acepta un payload con `exp` que no es un número', async () => {
+    const { auth } = makeAuth()
+
+    // Un `NaN` serializado pasa un `typeof === 'number'` y haría que
+    // `now() > NaN` fuera `false`: una sesión que no caduca nunca.
+    const raro = sign(SECRET, Buffer.from(JSON.stringify({ login: 'albrodri', exp: 'mañana' })).toString('base64url'))
+
+    expect(auth.readSession(raro)).toBeUndefined()
+  })
+
+  it('no acepta un payload sin login', async () => {
+    const { auth } = makeAuth()
+
+    const sinLogin = sign(
+      SECRET,
+      Buffer.from(JSON.stringify({ exp: Date.now() + 1_000 })).toString('base64url'),
+    )
+
+    expect(auth.readSession(sinLogin)).toBeUndefined()
+  })
+
+  it('tolera un payload que no es JSON', async () => {
+    const { auth } = makeAuth()
+
+    expect(auth.readSession(sign(SECRET, 'esto-no-es-json'))).toBeUndefined()
   })
 })

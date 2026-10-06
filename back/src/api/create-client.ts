@@ -1,27 +1,20 @@
 /**
  * Montaje del cliente de 42 a partir del entorno.
  *
- * Vive aquí y no en el servidor ni en el CLI para que los dos usen
- * exactamente los mismos límites: si el `sync-once` gastara distinto, la
- * cuota de 1200 req/h se consumiría en el peor momento.
+ * Vive aquí y no en el servidor para que el wire-up de la app sea el mismo en
+ * los tests de integración que en producción: si el servidor construyera el
+ * cliente con otros topes, los tests no valdrían para nada.
  */
 
 import { FortyTwoClient } from './client.js'
-import { RateLimiter } from './rate-limiter.js'
-import { TokenManager } from './token-manager.js'
+import { createAppTokenProvider } from './app-token.js'
+import { createThrottle } from './throttle.js'
 import type { Env } from '../config/env.js'
 
 export function createApiClient(env: Env, fetchImpl: typeof fetch = fetch): FortyTwoClient {
-  // Los tres topes salen del entorno, y no de constantes aquí: el CLI y el
-  // servidor tienen que gastar igual, o la cuota se consume a distinto ritmo
-  // según quién sincronice.
-  const limiter = new RateLimiter({
-    minDelayMs: Math.round(env.API_REQUEST_DELAY_SECONDS * 1000),
-    maxPerMinute: env.SYNC_REQUESTS_PER_MINUTE,
-    maxPerHour: env.SYNC_REQUESTS_PER_HOUR,
-  })
+  const throttle = createThrottle({ minIntervalMs: env.MIN_REQUEST_INTERVAL_MS })
 
-  const tokens = new TokenManager({
+  const tokens = createAppTokenProvider({
     tokenUrl: env.FORTY_TWO_TOKEN_URL,
     uid: env.FORTY_TWO_UID,
     secret: env.FORTY_TWO_SECRET,
@@ -32,9 +25,10 @@ export function createApiClient(env: Env, fetchImpl: typeof fetch = fetch): Fort
   return new FortyTwoClient({
     apiV2Base: env.apiV2Base,
     userAgent: env.FORTY_TWO_USER_AGENT,
-    timeoutMs: 30_000,
-    pageSize: 100,
-    limiter,
+    timeoutMs: env.API_TIMEOUT_MS,
+    pageSize: env.PAGE_SIZE,
+    maxRetries: env.API_MAX_RETRIES,
+    throttle,
     tokens,
     fetchImpl,
   })

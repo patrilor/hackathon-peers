@@ -1,371 +1,241 @@
 /**
- * Tests de los repositorios.
+ * Tests de los repositorios: `availability` y `cache`.
  *
- * Aquí se prueba la lógica que hace que Sanatorio sirva para algo: cruzar
- * proyectos, ubicaciones y disponibilidad. Si esto falla, la web muestra
- * peers equivocados, y no hay forma de que alguien se entere.
+ * Los dos van contra una base SQLite real en memoria, no contra un mock. Con
+ * `@libsql/client` las consultas son `async`, y un mock que devolviera lo que
+ * espera el código no probaría nada: el error interesante en una consulta está
+ * en el SQL, no en el `await`.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { openDatabase, type Db } from '../../src/db/database.js'
-import { createUsersRepository, toUserInput } from '../../src/db/repositories/users.js'
-import { createProjectsRepository, normalizeStatus } from '../../src/db/repositories/projects.js'
+import { closeDatabase, openDatabase } from '../../src/db/database.js'
+import type { Db } from '../../src/db/database.js'
 import { createAvailabilityRepository } from '../../src/db/repositories/availability.js'
-import { createSyncStateRepository, SYNC_KEYS } from '../../src/db/repositories/sync-state.js'
+import {
+  createCacheRepository,
+  peersMetaKey,
+  peersPageKey,
+  peersPrefix,
+  userProjectsKey,
+} from '../../src/db/repositories/cache.js'
+import { textOf } from '../helpers/rows.js'
 
-const PISCINA = 2609 // "Piscina", el proyecto que usan los ejemplos de la API
-const LIBFT = 1337
+describe('repositorios', () => {
+  let db: Db
 
-let db: Db
-let users: ReturnType<typeof createUsersRepository>
-let projects: ReturnType<typeof createProjectsRepository>
-let availability: ReturnType<typeof createAvailabilityRepository>
-let syncState: ReturnType<typeof createSyncStateRepository>
-
-/** Entrada de campus con los campos mínimos que usa el repositorio. */
-beforeEach(() => {
-  db = openDatabase(':memory:')
-  users = createUsersRepository(db)
-  projects = createProjectsRepository(db)
-  availability = createAvailabilityRepository(db)
-  syncState = createSyncStateRepository(db)
-
-  projects.upsertCatalog([
-    { id: PISCINA, name: 'Piscina', slug: 'piscina' },
-    { id: LIBFT, name: 'Libft', slug: 'libft' },
-  ])
-})
-
-describe('normalizeStatus', () => {
-  it('acepta los dos estados que nos interesan', () => {
-    expect(normalizeStatus('in_progress')).toBe('in_progress')
-    expect(normalizeStatus('finished')).toBe('finished')
+  beforeEach(async () => {
+    db = await openDatabase({ url: 'file::memory:' })
   })
 
-  it('descarta el resto de estados de la API', () => {
-    // Si estos se colaran, el front recibiría un status que no sabe pintar.
-    for (const status of [
-      'waiting_to_be_started',
-      'upcoming',
-      'started',
-      'trashed',
-      'lo_que_sea',
-    ]) {
-      expect(normalizeStatus(status)).toBeNull()
-    }
-  })
-})
-
-describe('repositorio de personas', () => {
-  it('inserta y recupera por login', () => {
-    users.upsertMany([{ login: 'albrodri', id: 42, imageUrl: 'https://cdn/42/albrodri.jpg' }])
-
-    const user = users.findByLogin('albrodri')
-    expect(user?.user_id).toBe(42)
-    expect(user?.image_url).toBe('https://cdn/42/albrodri.jpg')
+  afterEach(() => {
+    closeDatabase(db)
   })
 
-  it('recupera por id numérico, que es lo que exigen algunas rutas de 42', () => {
-    users.upsertMany([{ login: 'plopez-l', id: 7 }])
+  describe('availability', () => {
+    it('devuelve false para alguien que nunca ha marcado su disponibilidad', async () => {
+      const repo = createAvailabilityRepository(db)
 
-    expect(users.findById(7)?.login).toBe('plopez-l')
+      expect(await repo.get('nuevo')).toBe(false)
+      expect(await repo.getUpdatedAt('nuevo')).toBeUndefined()
+    })
+
+    it('guarda y devuelve true', async () => {
+      const repo = createAvailabilityRepository(db)
+
+      expect(await repo.set('albrodri', true)).toBe(true)
+      expect(await repo.get('albrodri')).toBe(true)
+    })
+
+    it('guarda y devuelve false explícito, en vez de dejar un undefined', async () => {
+      const repo = createAvailabilityRepository(db)
+
+      await repo.set('albrodri', true)
+      expect(await repo.set('albrodri', false)).toBe(false)
+      // La fila sigue existiendo: se puede volver a poner a true y se recuerda
+      // cuándo se tocó por última vez.
+      expect(await repo.get('albrodri')).toBe(false)
+      expect(await repo.getUpdatedAt('albrodri')).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    })
+
+    it('sobrescribe en vez de duplicar al marcar dos veces', async () => {
+      const repo = createAvailabilityRepository(db)
+
+      await repo.set('albrodri', true)
+      await repo.set('albrodri', false)
+      await repo.set('albrodri', true)
+
+      const rows = await repo.listAll()
+      expect(rows).toHaveLength(1)
+      expect(Number(rows[0]?.available)).toBe(1)
+    })
+
+    it('devuelve todos los logins indexados en un mapa', async () => {
+      const repo = createAvailabilityRepository(db)
+
+      await repo.set('albrodri', true)
+      await repo.set('mgomez', false)
+      await repo.set('jdoe', true)
+
+      const map = await repo.mapOfAll()
+
+      expect(map.get('albrodri')).toBe(true)
+      expect(map.get('jdoe')).toBe(true)
+      // Guardado como false explícito, y en el mapa como false.
+      expect(map.get('mgomez')).toBe(false)
+      expect(map.size).toBe(3)
+    })
+
+    it('deja fuera a quien no ha marcado nada', async () => {
+      const repo = createAvailabilityRepository(db)
+
+      await repo.set('albrodri', true)
+
+      expect((await repo.mapOfAll()).has('jdoe')).toBe(false)
+    })
   })
 
-  it('actualiza sin duplicar cuando llega el mismo login otra vez', () => {
-    users.upsertMany([{ login: 'albrodri', id: 42, imageUrl: 'https://cdn/viejo.jpg' }])
-    users.upsertMany([{ login: 'albrodri', id: 42, imageUrl: 'https://cdn/nuevo.jpg' }])
+  describe('cache', () => {
+    it('devuelve undefined si no está la clave', async () => {
+      const cache = createCacheRepository(db)
 
-    expect(users.count()).toBe(1)
-    expect(users.findByLogin('albrodri')?.image_url).toBe('https://cdn/nuevo.jpg')
-  })
+      expect(await cache.get('nada')).toBeUndefined()
+    })
 
-  it('guarda image null cuando la API no trae imagen', () => {
-    users.upsertMany([{ login: 'sinfoto', id: 9, imageUrl: null }])
+    it('guarda y recupera un objeto', async () => {
+      const cache = createCacheRepository(db)
+      const valor = { total: 2047, per_page: 100, pages: 21 }
 
-    // Nunca debe quedar "undefined": el front espera string o null.
-    expect(users.findByLogin('sinfoto')?.image_url).toBeNull()
-  })
+      await cache.set(peersMetaKey(2689), valor, 900)
 
-  it('acepta un lote vacío sin tocar nada', () => {
-    expect(() => {
-      users.upsertMany([])
-    }).not.toThrow()
-    expect(users.count()).toBe(0)
-  })
+      expect(await cache.get(peersMetaKey(2689))).toEqual(valor)
+    })
 
-  it('guarda la ubicación que trae la API', () => {
-    users.upsertMany([{ login: 'albrodri', id: 42, location: 'c2r17s2' }])
+    it('sobrescribe la misma clave en vez de duplicarla', async () => {
+      const cache = createCacheRepository(db)
 
-    expect(users.findByLogin('albrodri')?.current_location).toBe('c2r17s2')
-    expect(users.findByLogin('albrodri')?.location_synced_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
-  })
+      await cache.set(peersPageKey(2689, 1), [{ login: 'a' }], 900)
+      await cache.set(peersPageKey(2689, 1), [{ login: 'b' }], 900)
 
-  it('borra la ubicación cuando la API dice que ya no está en el campus', () => {
-    users.upsertMany([{ login: 'albrodri', id: 42, location: 'c2r17s2' }])
-    users.upsertMany([{ login: 'albrodri', id: 42, location: null }])
+      expect(await cache.get(peersPageKey(2689, 1))).toEqual([{ login: 'b' }])
+      expect(await cache.count()).toBe(1)
+    })
 
-    expect(users.findByLogin('albrodri')?.current_location).toBeNull()
-  })
+    it('trata una fila caducada como si no existiera', async () => {
+      const cache = createCacheRepository(db)
 
-  it('NO borra la ubicación si el endpoint no habla de ubicaciones', () => {
-    // El matiz que hace que todo esto funcione: `undefined` es "este endpoint no
-    // dice dónde está", no "no está". `/projects_users` manda resúmenes sin
-    // `location`, y si se tomaran como `null` todo el mundo aparecería fuera del
-    // campus en cuanto se sincronizara cualquier proyecto.
-    users.upsertMany([{ login: 'albrodri', id: 42, location: 'c2r17s2' }])
-    users.upsertMany([{ login: 'albrodri', id: 42, imageUrl: 'https://cdn/nuevo.jpg' }])
+      // Caduca en el pasado: ni siquiera hay que esperar a que pase el tiempo.
+      await cache.set('peers:2689:meta', { total: 1 }, -1)
 
-    expect(users.findByLogin('albrodri')?.current_location).toBe('c2r17s2')
-    // La foto sí se actualiza: cada endpoint solo informa de lo suyo.
-    expect(users.findByLogin('albrodri')?.image_url).toBe('https://cdn/nuevo.jpg')
-  })
+      expect(await cache.get('peers:2689:meta')).toBeUndefined()
+    })
 
-  it('propaga undefined como "no informado" desde el objeto de la API', () => {
-    // `toUserInput` no debe convertir el `undefined` de la API en `null`, o el
-    // test anterior pasaría por casualidad y este por nada.
-    expect(toUserInput({ id: 1, login: 'albrodri' }).location).toBeUndefined()
-    expect(toUserInput({ id: 1, login: 'albrodri', location: null }).location).toBeNull()
-    expect(toUserInput({ id: 1, login: 'albrodri', location: 'c1r2s1' }).location).toBe('c1r2s1')
-  })
-})
+    it('purga lo caducado y conserva lo que sigue vivo', async () => {
+      const cache = createCacheRepository(db)
 
-describe('ubicaciones y disponibilidad', () => {
-  beforeEach(() => {
-    users.upsertMany([
-      { login: 'albrodri', id: 1, location: 'c2r17s2' },
-      { login: 'plopez-l', id: 2, location: null },
-    ])
-  })
+      await cache.set('peers:2689:p1', [{ login: 'viejo' }], -1)
+      await cache.set('peers:2689:p2', [{ login: 'nuevo' }], 900)
 
-  it('conserva la disponibilidad de quien se va del campus', () => {
-    availability.set('albrodri', true)
+      expect(await cache.purgeExpired()).toBe(1)
+      expect(await cache.get('peers:2689:p1')).toBeUndefined()
+      expect(await cache.get('peers:2689:p2')).toEqual([{ login: 'nuevo' }])
+    })
 
-    // La disponibilidad es un dato nuestro y no se borra al salir del campus.
-    // Lo que decide si está "de guardia" es la combinación de los dos campos.
-    expect(availability.get('albrodri')).toBe(true)
+    it('borra una clave concreta', async () => {
+      const cache = createCacheRepository(db)
 
-    // Al irse del campus, lo que se pierde es el puesto, no la guardia.
-    users.upsertMany([{ login: 'albrodri', id: 1, location: null }])
+      await cache.set('user_projects:albrodri', [{ id: 1, name: 'p' }], 900)
+      await cache.drop(userProjectsKey('albrodri'))
 
-    expect(users.findByLogin('albrodri')?.current_location).toBeNull()
-    expect(availability.get('albrodri')).toBe(true)
-  })
-})
+      expect(await cache.get(userProjectsKey('albrodri'))).toBeUndefined()
+    })
 
-describe('repositorio de disponibilidad', () => {
-  beforeEach(() => {
-    // La disponibilidad tiene clave foránea contra `users`: solo se puede marcar
-    // la de alguien que ya conocemos, que es justo lo que pasa tras el login.
-    users.upsertMany([
-      { login: 'albrodri', id: 1 },
-      { login: 'nuevo', id: 2 },
-    ])
-  })
+    it('borra todas las claves de un prefijo sin tocar las de otro proyecto', async () => {
+      const cache = createCacheRepository(db)
 
-  it('devuelve false si nadie ha marcado nada todavía', () => {
-    // Nunca undefined: el front trata `available` como booleano.
-    expect(availability.get('nuevo')).toBe(false)
-  })
+      await cache.set(peersMetaKey(2689), { total: 2047 }, 900)
+      await cache.set(peersPageKey(2689, 1), [{ login: 'a' }], 900)
+      await cache.set(peersPageKey(2689, 2), [{ login: 'b' }], 900)
+      await cache.set(peersMetaKey(2705), { total: 12 }, 900)
 
-  it('guarda y recupera el valor', () => {
-    availability.set('albrodri', true)
-    expect(availability.get('albrodri')).toBe(true)
+      expect(await cache.countWithPrefix(peersPrefix(2689))).toBe(3)
 
-    availability.set('albrodri', false)
-    expect(availability.get('albrodri')).toBe(false)
-  })
+      await cache.dropPrefix(peersPrefix(2689))
 
-  it('crea fila explícita incluso al guardar false', () => {
-    availability.set('albrodri', false)
+      expect(await cache.countWithPrefix(peersPrefix(2689))).toBe(0)
+      // El otro proyecto sigue ahí: invalidar uno no puede tumbar el otro.
+      expect(await cache.get(peersMetaKey(2705))).toEqual({ total: 12 })
+    })
 
-    expect(availability.getUpdatedAt('albrodri')).toBeDefined()
-    expect(availability.listAll()).toHaveLength(1)
-  })
+    it('lee lo caducado con getStale, para cuando la 42 está caída', async () => {
+      const cache = createCacheRepository(db)
 
-  it('rechaza marcar la disponibilidad de alguien que no conocemos', () => {
-    // La clave foránea lo impide. Preferimos esto a guardar filas de availability
-    // huérfanas que luego el endpoint de peers no sabría interpretar.
-    expect(() => availability.set('fantasma', true)).toThrow(/FOREIGN KEY/i)
-  })
-})
+      await cache.set('peers:2689:p1', [{ login: 'viejo' }], -1)
 
-describe('repositorio de proyectos y peers', () => {
-  beforeEach(() => {
-    // albrodri: tiene Piscina en curso, está en el campus y de guardia.
-    // plopez-l: tiene Piscina en curso, pero está fuera del campus.
-    // legomez: aprobó Piscina, está en el campus pero fuera de turno.
-    // outsider: tiene Piscina en curso pero no sabemos dónde está.
-    users.upsertMany([
-      { login: 'albrodri', id: 1, imageUrl: 'https://cdn/a.jpg', location: 'c2r17s2' },
-      { login: 'plopez-l', id: 2, location: null },
-      { login: 'legomez', id: 3, location: 'c2r20s1' },
-      { login: 'outsider', id: 4, location: null },
-    ])
+      // `get` lo da por perdido; `getStale` lo saca, porque un compañero de hace
+      // media hora sigue sirviendo de pista.
+      expect(await cache.get('peers:2689:p1')).toBeUndefined()
+      expect(await cache.getStale('peers:2689:p1')).toEqual([{ login: 'viejo' }])
+    })
 
-    projects.replaceForUser('albrodri', [
-      { status: 'in_progress', project: { id: PISCINA, name: 'Piscina' } },
-    ])
-    projects.replaceForUser('plopez-l', [
-      { status: 'in_progress', project: { id: PISCINA, name: 'Piscina' } },
-    ])
-    projects.replaceForUser('legomez', [
-      { status: 'finished', project: { id: PISCINA, name: 'Piscina' } },
-    ])
-    projects.replaceForUser('outsider', [
-      { status: 'in_progress', project: { id: PISCINA, name: 'Piscina' } },
-    ])
+    it('getStale también lee lo que está vivo', async () => {
+      const cache = createCacheRepository(db)
 
-    // Solo albrodri está de guardia. Se marca después de insertar las personas
-    // porque `availability.login` es clave foránea contra `users.login`.
-    availability.set('albrodri', true)
-  })
+      await cache.set('peers:2689:p1', [{ login: 'fresco' }], 900)
 
-  it('devuelve los proyectos en curso de una persona, no los aprobados', () => {
-    projects.replaceForUser('albrodri', [
-      { status: 'in_progress', project: { id: PISCINA, name: 'Piscina' } },
-      { status: 'finished', project: { id: LIBFT, name: 'Libft' } },
-    ])
+      expect(await cache.getStale('peers:2689:p1')).toEqual([{ login: 'fresco' }])
+    })
 
-    // /me/projects pregunta "en qué estoy ahora", no "qué he aprobado nunca".
-    expect(projects.findInProgressByUser('albrodri')).toEqual([{ id: PISCINA, name: 'Piscina' }])
-  })
+    it('getStale devuelve undefined si no está', async () => {
+      expect(await createCacheRepository(db).getStale('nada')).toBeUndefined()
+    })
 
-  it('trae a los participantes del proyecto con los cuatro campos del contrato', () => {
-    const peers = projects.findPeers(PISCINA)
+    it('no se rompe con un JSON corrupto en vez de tumbar la petición', async () => {
+      const cache = createCacheRepository(db)
 
-    expect(peers.map((peer) => peer.login).sort()).toEqual([
-      'albrodri',
-      'legomez',
-      'outsider',
-      'plopez-l',
-    ])
+      await db.execute({
+        sql: `INSERT INTO cache (key, value, expires_at, updated_at)
+              VALUES ('rota', 'esto no es json', '2999-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      })
 
-    for (const peer of peers) {
-      expect(Object.keys(peer).sort()).toEqual([
-        'available',
+      expect(await cache.get('rota')).toBeUndefined()
+    })
+
+    it('no guarda PII: solo lo que el front necesita', async () => {
+      const cache = createCacheRepository(db)
+
+      await cache.set(
+        peersPageKey(2689, 1),
+        [{ login: 'albrodri', image: null, location: 'c2r17s2', status: 'in_progress', available: false }],
+        900,
+      )
+
+      const fila = await db.execute({
+        sql: 'SELECT value FROM cache WHERE key = ?',
+        args: [peersPageKey(2689, 1)],
+      })
+      const value = textOf(fila.rows[0], 'value')
+      const guardados = JSON.parse(value) as Record<string, unknown>[]
+
+      expect(Object.keys(guardados[0] ?? {})).toEqual([
+        'login',
         'image',
         'location',
-        'login',
         'status',
+        'available',
       ])
-      expect(typeof peer.available).toBe('boolean')
-    }
+      expect(value).not.toMatch(/@42|wallet|correction_point/)
+    })
   })
 
-  it('distingue a quien está en el campus de quien no', () => {
-    const peers = projects.findPeers(PISCINA)
-    const byLogin = new Map(peers.map((peer) => [peer.login, peer]))
-
-    expect(byLogin.get('albrodri')?.location).toBe('c2r17s2')
-    expect(byLogin.get('plopez-l')?.location).toBeNull()
-    expect(byLogin.get('outsider')?.location).toBeNull()
-  })
-
-  it('olvida una ubicación que lleva demasiado tiempo sin refrescar', () => {
-    vi.useFakeTimers()
-    try {
-      vi.setSystemTime(new Date('2026-10-04T12:00:00.000Z'))
-
-      // Se reinscribe con el reloj congelado para que `location_synced_at` sea
-      // ese momento y no el real, con el que el corte no tendría sentido.
-      users.upsertMany([
-        { login: 'albrodri', id: 1, imageUrl: 'https://cdn/a.jpg', location: 'c2r17s2' },
-      ])
-
-      expect(projects.findPeers(PISCINA).find((p) => p.login === 'albrodri')?.location).toBe('c2r17s2')
-
-      // Pasada la ventana, el puesto del cluster sigue ahí en la base pero ya no
-      // se cuenta: puede que la persona se levantara hace media hora.
-      vi.setSystemTime(new Date('2026-10-04T12:31:00.000Z'))
-
-      const peer = projects.findPeers(PISCINA).find((p) => p.login === 'albrodri')
-
-      expect(peer?.location).toBeNull()
-      // Caducar la ubicación no debe tocar nada más del peer.
-      expect(peer?.available).toBe(true)
-      expect(peer?.image).toBe('https://cdn/a.jpg')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('marca como especialista a quien ya aprobó el proyecto', () => {
-    const peers = projects.findPeers(PISCINA)
-    const byLogin = new Map(peers.map((peer) => [peer.login, peer]))
-
-    expect(byLogin.get('albrodri')?.status).toBe('in_progress')
-    expect(byLogin.get('legomez')?.status).toBe('finished')
-  })
-
-  it('deja available en false a quien no ha marcado disponibilidad', () => {
-    const peers = projects.findPeers(PISCINA)
-    const byLogin = new Map(peers.map((peer) => [peer.login, peer]))
-
-    // legomez está en el campus pero fuera de turno: available false, no undefined.
-    expect(byLogin.get('legomez')).toMatchObject({ location: 'c2r20s1', available: false })
-    expect(byLogin.get('outsider')?.available).toBe(false)
-    expect(byLogin.get('albrodri')?.available).toBe(true)
-  })
-
-  it('solo devuelve quienes tienen el proyecto en un estado que modelamos', () => {
-    projects.replaceForUser('raro', [
-      { status: 'waiting_to_be_started', project: { id: PISCINA, name: 'Piscina' } },
-      { status: 'trashed', project: { id: LIBFT, name: 'Libft' } },
-    ])
-    users.upsertMany([{ login: 'raro', id: 99 }])
-
-    expect(projects.findPeers(PISCINA).map((peer) => peer.login)).not.toContain('raro')
-  })
-
-  it('olvida un proyecto que alguien ya no tiene', () => {
-    // La API dejó de devolverlo: es un snapshot, así que desaparece.
-    projects.replaceForUser('albrodri', [])
-
-    expect(projects.findPeers(PISCINA).map((peer) => peer.login)).not.toContain('albrodri')
-  })
-
-  it('devuelve lista vacía para un proyecto sin participantes', () => {
-    expect(projects.findPeers(999999)).toEqual([])
-  })
-
-  it('expone el catálogo de proyectos', () => {
-    expect(projects.exists(PISCINA)).toBe(true)
-    expect(projects.exists(999999)).toBe(false)
-    expect(projects.findNameById(LIBFT)).toBe('Libft')
-    expect(projects.countParticipants(PISCINA)).toBe(4)
-  })
-})
-
-describe('estado de la sincronización', () => {
-  it('guarda y lee un valor', () => {
-    syncState.set(SYNC_KEYS.LAST_USER, 'albrodri')
-
-    expect(syncState.get(SYNC_KEYS.LAST_USER)).toBe('albrodri')
-  })
-
-  it('devuelve undefined si la clave no existe', () => {
-    expect(syncState.get('nunca_escrita')).toBeUndefined()
-  })
-
-  it('guarda y lee fechas', () => {
-    const moment = new Date('2026-10-04T10:00:00.000Z')
-    syncState.setDate(SYNC_KEYS.USER_PROJECTS, moment)
-    expect(syncState.getDate(SYNC_KEYS.USER_PROJECTS)?.toISOString()).toBe('2026-10-04T10:00:00.000Z')
-  })
-
-  it('trata un checkpoint corrupto como "nunca sincronizado"', () => {
-    syncState.set(SYNC_KEYS.USER_PROJECTS, 'no-es-una-fecha')
-
-    // No debe lanzar: se sincroniza de cero antes que tumbar el arranque.
-    expect(syncState.getDate(SYNC_KEYS.USER_PROJECTS)).toBeUndefined()
-  })
-
-  it('sobrescribe sin duplicar la clave', () => {
-    syncState.set(SYNC_KEYS.LAST_USER, 'albrodri')
-    syncState.set(SYNC_KEYS.LAST_USER, 'plopez-l')
-
-    expect(syncState.listAll()).toHaveLength(1)
-    expect(syncState.get(SYNC_KEYS.LAST_USER)).toBe('plopez-l')
+  describe('claves de la caché', () => {
+    it('son estables y distinguen proyectos y páginas', () => {
+      expect(userProjectsKey('albrodri')).toBe('user_projects:albrodri')
+      expect(peersMetaKey(2689)).toBe('peers:2689:meta')
+      expect(peersPageKey(2689, 21)).toBe('peers:2689:p21')
+      // El prefijo de un proyecto incluye los dos puntos del final para no
+      // confundirse con el prefijo de otro que empiece igual (`:p1` vs `:p12`).
+      expect(peersPrefix(2689)).toBe('peers:2689:')
+    })
   })
 })

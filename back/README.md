@@ -17,6 +17,12 @@ seguimos dando datos.
 ## Arranque rápido
 
 ```bash
+make up                     # instala, crea el .env si falta, migra y arranca
+```
+
+O a mano, que es lo mismo:
+
+```bash
 npm install
 cp .env.example .env        # y rellena FORTY_TWO_UID, FORTY_TWO_SECRET y SESSION_SECRET
 npm run db:migrate          # crea data/sanatorio.db con el esquema
@@ -29,6 +35,10 @@ Para generar una clave de sesión:
 openssl rand -base64 48
 ```
 
+[`LOCAL.md`](./LOCAL.md) es la guía de operación: qué comandos hay, cómo probar
+las rutas sin navegador, y qué hacer cuando algo falla. `make help` lista los
+atajos.
+
 ### Scripts
 
 | Script                            | Qué hace                                        |
@@ -39,7 +49,7 @@ openssl rand -base64 48
 | `npm run sync -- <login>`         | Sincroniza los datos de un usuario y sale.      |
 | `npm run sync -- <login> --force` | Ignora los checkpoints y rehace todo.           |
 | `npm run db:migrate`              | Aplica las migraciones pendientes.              |
-| `npm test`                        | Suite completa (203 tests).                     |
+| `npm test`                        | Suite completa (218 tests).                     |
 | `npm run typecheck`               | `tsc --noEmit`.                                 |
 | `npm run lint`                    | ESLint.                                         |
 | `npm run format`                  | Prettier.                                       |
@@ -57,7 +67,7 @@ variable por variable. Las que de verdad importan:
 | `SESSION_SECRET`                     | Firma las cookies. Mínimo 16 caracteres.                                        |
 | `FRONTEND_ORIGINS`                   | Orígenes con CORS. Con credenciales **no** puede ser `*`.                       |
 | `DATABASE_PATH`                      | Fichero SQLite. Se crea solo.                                                   |
-| `CAMPUS_ID`                          | Madrid = `22`, Common Core = `21`.                                              |
+| `CURSUS_ID`                          | Common Core = `21`, Madrid = `22`.                                              |
 | `SYNC_REQUESTS_PER_HOUR`             | Tope de peticiones a la API. Es el límite real de 42: pasarse da `429`.         |
 
 ### Scopes de la app OAuth

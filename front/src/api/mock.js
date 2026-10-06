@@ -74,6 +74,9 @@ export const mockApi = {
 
   async getPeers(projectId) {
     await delay()
+    // Devuelve la lista tal cual, como dice `docs/api.md`. El total y el estado
+    // de descarga solo existen en la API real (viven en las cabeceras), y
+    // `PeerList.normalizar` los rellena con la longitud de esta lista.
     return PEERS[projectId] ?? []
   },
 

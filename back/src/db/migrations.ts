@@ -5,11 +5,32 @@
  * El número de versión se guarda en `PRAGMA user_version`, que es la forma
  * que SQLite ofrece para esto sin crear una tabla extra.
  *
- * Por qué replicamos datos y no consultamos la API en cada petición:
- * la API de 42 limita a 2 peticiones por segundo, y distinguir quién tiene
- * un proyecto en curso de quien ya lo aprobó exige pedir `projects_users`
- * persona a persona. En un proyecto común son cientos de llamadas: imposible
- * hacerlo dentro de un request. Guardamos, entonces, una réplica local.
+ * ## Por qué el número salta a 10
+ *
+ * El esquema anterior (réplica completa) llegó a la versión 3. La primera
+ * migración de este esquema mínimo se llama **versión 10** a propósito, no 1: un
+ * número bajo haría que una base ya migrada a la 3 pareciera *más nueva* que el
+ * código, no se le aplicaría nada y fallaría la primera consulta con "no such
+ * table: cache". Con un número por encima de todo lo histórico, cualquier base
+ * existente pasa por esta migración y toda base nueva arranca en 0 y la aplica.
+ *
+ * La migración también **borra** las tablas de la réplica. No es descuido: sus
+ * datos eran una copia de la API de 42, que se vuelve a pedir cuando hace falta,
+ * así que no hay nada que conservar. Ver el comentario de cada `DROP TABLE`.
+ *
+ * Por qué **no** replicamos la API de 42 entera, que es lo que hacía la
+ * versión anterior de este esquema:
+ *
+ * La API limita a 2 peticiones por segundo. Un solo proyecto grande ("Call Me
+ * Maybe", `2689`) tiene 2 047 participantes, que son 21 páginas de 100. Y el
+ * catálogo global son 1 702 proyectos, 18 páginas más. Replicarlo todo costaba
+ * más de 100 segundos por ciclo, quemaba la cuota de 1 200 peticiones por hora
+ * y obligaba a que **cada lectura** esperara a la sincronización: con la 42
+ * contestando `503`, una petición podía tardar minutos y morir.
+ *
+ * Aquí no hay réplica. Hay una caché de lectura bajo demanda y una tabla con el
+ * único dato que Sanatorio inventa. Dos tablas, y el back va rápido porque casi
+ * siempre lee de la caché.
  */
 
 /** Una migración: versión, nombre y las sentencias SQL que la componen. */
@@ -24,123 +45,76 @@ export type Migration = {
 
 export const MIGRATIONS: readonly Migration[] = [
   {
-    version: 1,
-    name: 'esquema-inicial',
+    version: 10,
+    name: 'esquema-minimo',
     statements: [
-      // --- Personas -------------------------------------------------------
-      // `login` es la clave natural porque es lo que devuelve el front en
-      // `docs/api.md` y lo que usa 42 en la URL de los perfiles.
-      // Guardamos también `user_id` porque algunas rutas de la API lo exigen.
-      `CREATE TABLE users (
-        login            TEXT PRIMARY KEY,
-        user_id          INTEGER NOT NULL,
-        kind             TEXT NOT NULL DEFAULT 'student',
-        usual_full_name  TEXT,
-        image_url        TEXT,
-        synced_at        TEXT NOT NULL
-      )`,
-      `CREATE UNIQUE INDEX idx_users_user_id ON users (user_id)`,
-
-      // --- Ubicaciones ----------------------------------------------------
-      // El "puesto" del cluster. La API lo llama `host` ("c2r17s2") dentro de
-      // /campus/:id/locations. Solo guardamos quien está en el campus ahora.
-      `CREATE TABLE user_locations (
-        login       TEXT PRIMARY KEY REFERENCES users (login) ON DELETE CASCADE,
-        campus_id   INTEGER NOT NULL,
-        host        TEXT NOT NULL,
-        is_primary  INTEGER NOT NULL DEFAULT 1,
-        updated_at  TEXT NOT NULL
-      )`,
-      `CREATE INDEX idx_user_locations_campus ON user_locations (campus_id)`,
-
-      // --- Proyectos ------------------------------------------------------
-      // Catálogo mínimo: solo el id y el nombre, que es lo que necesita el front.
-      `CREATE TABLE projects (
-        id    INTEGER PRIMARY KEY,
-        name  TEXT NOT NULL,
-        slug  TEXT
-      )`,
-      `CREATE INDEX idx_projects_name ON projects (name)`,
-
-      // --- Estado de cada persona en cada proyecto -------------------------
-      // El corazón del modelo. `status` distingue "lo está haciendo" de
-      // "ya lo aprobó", que es justo lo que separa a un especialista.
-      // La API devuelve más valores ('waiting_to_be_started', 'upcoming', …):
-      // solo nos interesan estos dos, y se filtran al escribir.
-      `CREATE TABLE user_projects (
-        login       TEXT NOT NULL REFERENCES users (login) ON DELETE CASCADE,
-        project_id  INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
-        status      TEXT NOT NULL CHECK (status IN ('in_progress', 'finished')),
-        updated_at  TEXT NOT NULL,
-        PRIMARY KEY (login, project_id)
-      )`,
-      // Índice compuesto porque la consulta caliente es
-      // "todos los de este proyecto, agrupados por estado".
-      `CREATE INDEX idx_user_projects_by_project
-        ON user_projects (project_id, status)`,
+      // --- Fuera la réplica --------------------------------------------------
+      // Tablas del esquema anterior. Se borran antes de crear las nuevas para
+      // que el resultado no dependa del orden.
+      //
+      // `sync_state` guardaba en qué punto iba la sincronización; sin
+      // sincronización no tiene sentido. `users` y `projects` eran copias
+      // íntegras de la API, y `user_projects` su relación: los tres se vuelven a
+      // pedir bajo demanda. Perderlos no es perder información, es tirar una
+      // caché.
+      //
+      // **No** se borra `availability`: ahí está la decisión de "de guardia" que
+      // puso la gente, y no se puede volver a pedirle a la API. Se conserva tal
+      // cual; el `CREATE` de abajo lleva `IF NOT EXISTS` por si acaso, y por
+      // si la migración se corta y hay que reintentarla.
+      `DROP TABLE IF EXISTS user_projects`,
+      `DROP TABLE IF EXISTS users`,
+      `DROP TABLE IF EXISTS projects`,
+      `DROP TABLE IF EXISTS sync_state`,
 
       // --- Guardia ---------------------------------------------------------
-      // ESTE DATO NO EXISTE EN LA API DE 42. Es nuestro.
-      // Por eso `available` solo puede venir de aquí.
-      `CREATE TABLE availability (
-        login       TEXT PRIMARY KEY REFERENCES users (login) ON DELETE CASCADE,
-        available   INTEGER NOT NULL DEFAULT 0 CHECK (available IN (0, 1)),
-        updated_at  TEXT NOT NULL
+      // ESTE DATO NO EXISTE EN LA API DE 42. Nadie en 42 publica si está
+      // disponible para hacerte una pareja. Por eso `available` solo puede
+      // venir de aquí, y por eso es la única tabla que la web escribe.
+      //
+      // No hay clave foránea a ninguna tabla de personas: no hay tabla de
+      // personas. Quien entra puede marcarse disponible sin que nada más
+      // exista sobre él en nuestra base.
+      //
+      // La tabla de antes tenía una clave foránea a `users`, que aquí ya no
+      // existe. Para las bases antiguas, se reconstruye sin ella: se copia a una
+      // tabla nueva y se cambia el nombre, porque `ALTER TABLE ... DROP
+      // COLUMN` no es válido en SQLite.
+      `CREATE TABLE IF NOT EXISTS availability (
+        login      TEXT PRIMARY KEY,
+        available  INTEGER NOT NULL DEFAULT 0 CHECK (available IN (0, 1)),
+        updated_at TEXT NOT NULL
       )`,
 
-      // --- Estado de la sincronización ------------------------------------
-      // Checkpoints y marcas de tiempo, para poder reanudar y saber
-      // desde cuándo es válido cada cosa.
-      `CREATE TABLE sync_state (
+      // --- Caché genérica --------------------------------------------------
+      // Una sola tabla para todo lo que viene de la API de 42. El `key` dice
+      // qué es, y el JSON es lo que se devolvió:
+      //
+      //   'peers:2689:meta'          { total, per_page, pages }
+      //   'peers:2689:p1' … ':p21'   [ { login, image, location, status }, … ]
+      //   'user_projects:albrodri'   [ { id, name }, … ]
+      //
+      // Los participantes van **una fila por página** y no uno solo con todo
+      // dentro, por dos razones: el proyecto 2689 no cabe cómodo en una fila
+      // (unos 400 KB de JSON) y, sobre todo, porque así la descarga se puede
+      // presupuestar por páginas. La API va a 2 peticiones por segundo, así que
+      // bajarse las 21 enteras son ~11 s, más que el límite de duración de una
+      // función en Vercel. Cada petición se gasta un presupuesto pequeño y las
+      // siguientes van reuniendo lo que ya hay.
+      //
+      // Una tabla genérica en vez de una por recurso: con dos recursos en
+      // caché, dos tablas casi idénticas son más código que una con un
+      // discriminante, y la clave ya dice qué es cada fila.
+      `CREATE TABLE IF NOT EXISTS cache (
         key         TEXT PRIMARY KEY,
         value       TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
         updated_at  TEXT NOT NULL
       )`,
-    ],
-  },
-  {
-    version: 2,
-    name: 'sesiones',
-    statements: [
-      // --- Sesiones -------------------------------------------------------
-      // La cookie lleva un identificador opaco y firmado, no el token de 42.
-      // Dos razones: el token no viaja en cada petición, y el logout es de
-      // verdad un borrado, no un "confía en que el navegador tire la cookie".
-      `CREATE TABLE sessions (
-        session_id   TEXT PRIMARY KEY,
-        login        TEXT NOT NULL REFERENCES users (login) ON DELETE CASCADE,
-        access_token TEXT NOT NULL,
-        expires_at   INTEGER NOT NULL,
-        created_at   TEXT NOT NULL
-      )`,
-      // El índice es para la limpieza de sesiones caducadas, que va por
-      // `expires_at` y no por la clave primaria.
-      `CREATE INDEX idx_sessions_expires_at ON sessions (expires_at)`,
-    ],
-  },
-  {
-    version: 3,
-    name: 'ubicaciones-en-usuarios',
-    statements: [
-      // --- La ubicación pasa a ser de la persona --------------------------
-      // `/campus/:id/locations` devolvía `X-Total: 751 077` para Madrid, o sea
-      // 7 511 páginas de 100. A 550 ms por petición son unas 69 minutos de
-      // reloj, y contra la cuota de 1200 por hora serían más de seis horas: el
-      // sincronizador no terminaría nunca. Ese endpoint devuelve además el
-      // histórico de ubicaciones, no solo las de ahora, así que no hay forma de
-      // filtrar por las activas.
-      //
-      // La ubicación actual ya viene en el propio usuario (`GET /v2/users/:login`
-      // y los objetos completos de otros endpoints), así que se guarda aquí y
-      // se lee de aquí. Una petición por persona en vez de 7 511.
-      `ALTER TABLE users ADD COLUMN current_location TEXT`,
-      // Cuándo se observó esa ubicación. Sin esto, alguien que se fue del
-      // campus seguiría figurando como "en c2r17s2" hasta que volviéramos a
-      // mirarlo, y con la cuota tan justa puede que nunca volviéramos.
-      `ALTER TABLE users ADD COLUMN location_synced_at TEXT`,
 
-      // La tabla queda inútil: ya no hay snapshot del campus.
-      `DROP TABLE user_locations`,
+      // Para purgar lo caducado en un solo `DELETE`, que es la operación de
+      // mantenimiento de la caché.
+      `CREATE INDEX IF NOT EXISTS idx_cache_expires_at ON cache (expires_at)`,
     ],
   },
 ]

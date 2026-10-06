@@ -510,6 +510,7 @@ elige la que corresponda al entorno.
 | `GET /v2/users/:login` | `200`, con todos los campos. Trae `location`: puesto actual o `null` |
 | `GET /v2/projects` | `200`, **1 702** proyectos |
 | `GET /v2/users/:login/projects_users` | `200`. Funciona con `public`: **no hace falta `profile` ni `projects`** |
+| `GET /v2/projects_users?filter[project_id]=:id` | `200`, con `status` y `user` anidado en cada entrada (§10.7) |
 | `GET /v2/users/:login/locations` | `200`. Por usuario: 0–406 filas según el usuario |
 | `GET /v2/me` con token de app | `404 {}` — esperado, no hay `resource_owner_id` |
 
@@ -518,7 +519,8 @@ elige la que corresponda al entorno.
 > para `/v2/me`, y eso ya lo pedía el login con token de usuario.
 
 > 🚨 **`/v2/campus/22/locations` está descartado.** Devuelve
-> `X-Total: 751 077`, o sea **7 511 páginas** de 100. A 550 ms por petición son
+> `X-Total: 751 077` registros, o sea **7 511 páginas** de 100 (`X-Total` son
+> registros, ver §5). A 550 ms por petición son
 > unas 69 minutos, y contra la cuota de 1200/h serían más de seis horas de
 > limitador bloqueado y el sincronizador **nunca terminaría**. No es que sea
 > lento: es
@@ -728,7 +730,7 @@ x-application-roles: None
 
 | Header | Para qué sirve |
 |---|---|
-| `X-Total` | Número **total de páginas**. No el número de elementos. |
+| `X-Total` | Número **total de registros**, no de páginas. |
 | `X-Page` | Página actual |
 | `X-Per-Page` | Tamaño de página efectivo (puede ser menor de lo pedido) |
 | `Link` | URLs de `first`, `prev`, `next`, `last` |
@@ -737,8 +739,20 @@ x-application-roles: None
 | `X-Application-Id` / `X-Application-Name` | Identifican tu app en cada petición |
 | `X-Application-Roles` | Roles de tu app (`None` si no tienes rol) |
 
-> `X-Total` es el número de **páginas**, no de registros. Con `per_page=2` y
-> `X-Total: 22938` hay ≈45 876 usuarios. Para el total de registros: `X-Total × X-Per-Page`.
+> **`X-Total` es el número de registros, no de páginas.** La doc oficial dice lo
+> contrario y es un error que se arrastra a internet. Comprobado en la misma
+> respuesta: `/v2/campus/1/users?page=1&per_page=2` devuelve `X-Total: 22938` y
+> `Link: ...page=11469...; rel="last"` — 22 938 registros son 11 469 páginas de 2,
+> que es exactamente lo que dice `rel="last"`.
+>
+> Verificado también con datos reales del proyecto `2689`:
+> `GET /v2/projects_users?filter[project_id]=2689&per_page=100` devuelve
+> `X-Total: 2047` y `rel="last"` en la página **21**. Recorridas las 21 páginas:
+> 2 047 registros (20 páginas de 100 y una de 47), que es lo que dice `X-Total`.
+>
+> Para calcular las páginas: `Math.ceil(X-Total / X-Per-Page)`. Y para no
+> depender de ninguna de las dos cabeceras, pagina por tamaño de página hasta que
+> una venga incompleta: es lo que hace el cliente de este proyecto.
 
 ### Caché condicional con ETag
 
@@ -1385,7 +1399,8 @@ Leyenda: ✅ verificado con la app actual (scope `public`) · 🔒 requiere scop
 |---|---|---|
 | `GET /v2/projects` | Todos los proyectos | ✅ |
 | `GET /v2/projects/:slug` | Proyecto con `project_sessions` | ✅ |
-| `GET /v2/projects/:slug/users` | Usuarios que hicieron el proyecto | ✅ |
+| `GET /v2/projects/:slug/users` | Usuarios que hicieron el proyecto. **Sin estado** | ⚠️ ver §10.7 |
+| `GET /v2/projects_users?filter[project_id]=:id` | Participantes **con su estado**, su proyecto y su usuario anidado | ✅ **el bueno** |
 | `GET /v2/groups` | Grupos | ✅ |
 | `GET /v2/groups/:id` | Grupo | ✅ |
 | `GET /v2/groups/:id/users` | Usuarios del grupo | ✅ |
@@ -1449,7 +1464,64 @@ Estos existen en la API pero responden `404` con la app actual:
 | `GET /v2/apps`, `/v2/apps/:id` | `user` |
 | `GET /v2/staff` | `staff` |
 
-### 10.7 Catálogo oficial completo
+### 10.7 Participantes de un proyecto: el endpoint que importa
+
+Para la lista de compañeros hay dos endpoints que parecen servir y solo uno sirve:
+
+| | `/v2/projects/:id/users` | `/v2/projects_users?filter[project_id]=:id` |
+|---|---|---|
+| `status` | ❌ no viene | ✅ en cada entrada |
+| `project` con nombre | ❌ no viene | ✅ `{ id, name, slug }` |
+| `user` anidado | ⚠️ sí, aplanado | ✅ anidado en `user` |
+| `image` | ✅ en el objeto de nivel superior | ✅ dentro de `user` |
+| `location` | ✅ en el objeto de nivel superior | ✅ dentro de `user` |
+
+Comprobado con el proyecto `2689` ("Call Me Maybe"), recorrido entero:
+
+- `/v2/projects/2689/users` → 2 047 entradas, y en ninguna hay `status`.
+- `?filter[project_id]=2689` → las mismas 2 047, y cada una con `status`,
+  `project.name`, `user.login`, `user.image` y `user.location`.
+
+La diferencia no es cosmética. `/v2/projects/:id/users` obliga a **suponer** que
+todo el mundo está `in_progress`, y en el proyecto `2689` eso clasificaba a 1 454
+de 2 047 personas como "lo está haciendo" cuando el desglose real es:
+
+| status | Nº de personas |
+|---|---|
+| `in_progress` | 593 |
+| `finished` | 1 433 |
+| `waiting_for_correction` | 21 |
+
+Es decir: el endpoint corto clasificaba como "lo está haciendo" a 1 454 de 2 047
+personas que en realidad no lo estaban haciendo. Como la web separa
+"pacientes como tú" (en curso) de "especialistas" (ya lo aprobaron), usar el
+endpoint equivocado invierte la lista entera.
+
+Los estados que devuelve la 42 son más de dos: además de `in_progress` y
+`finished` aparecen `waiting_for_correction`, y en la doc también
+`waiting_for_scale`, `unstarted` y `done`. Si tu modelo solo tiene dos estados,
+**filtra los que no reconoces en vez de mapearlos a `in_progress`**: alguien que
+está esperando corrección no lo está haciendo, y meterlo en "lo está haciendo" es
+justo el error que se quería evitar.
+
+Y un detalle del filtro que no es evidente: `filter[project_id]` **no admite
+varios valores**, aunque la doc de filtros diga que los valores separados por
+comas funcionan. `?filter[project_id]=2689,2705` responde `200` sin error pero
+solo trae los del **primer** id (comprobado: 100 entradas, todas de `2689`).
+Pide los proyectos de uno en uno.
+
+Otros detalles verificados en esas 2 047 entradas:
+
+- `user` viene **siempre** anidado y nunca es `null` (2 047 de 2 047).
+- `image` existe siempre como clave, pero `link` y las cuatro `versions` pueden
+  ser todas `null`: 2 de 2 047 personas en esta muestra. Es una URL nula, no una
+  clave ausente.
+- `location` es `null` para la mayoría: 325 con puesto y 1 722 sin él. Que alguien
+  no esté en el campus es lo normal, no un dato roto.
+- Cada persona aparece **una vez**, aunque `occurrence` allows reintentos: los
+  `user.id` son 2 047 distintos.
+
+### 10.8 Catálogo oficial completo
 
 La referencia de 42 documenta muchos más recursos. La mayoría requieren scopes
 adicionales, pero esta es la lista completa para saber qué existe:
@@ -2222,7 +2294,8 @@ SESSION_SECRET=  # genera con: openssl rand -base64 48
 - [ ] `User-Agent` enviado (obligatorio con `urllib`)
 - [ ] Rate limit respetado: máx. 2 req/s (`sleep 0.55`)
 - [ ] `per_page=100` en listados; índices en vez de N llamadas al detalle
-- [ ] Paginación leída con `X-Total` / `Link`
+- [ ] Paginación por tamaño de página hasta que una venga incompleta
+      (`X-Total` son **registros**, no páginas; `Link; rel="last"` sí es la última)
 - [ ] Campos tratados como posiblemente `null`
 - [ ] Manejo de `400` (filtro inválido), `403` (scope), `404` (ruta bloqueada), `429`
 

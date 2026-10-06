@@ -3,19 +3,13 @@
  *
  * Aquí vive el `fetch` falso: una forma de decir "la API devuelve esto" sin
  * tocar la red. Todos los tests de `src/api` lo usan.
- */
-
-import type { RateLimiter } from '../../src/api/rate-limiter.js'
-import { RateLimiter as RealRateLimiter } from '../../src/api/rate-limiter.js'
-import { TokenManager } from '../../src/api/token-manager.js'
-
-/**
- * Tipos de `fetch` tomados de la propia función.
  *
- * Escribir `RequestInfo` a mano no compila: con el `lib` de este proyecto
- * ese nombre no existe y TypeScript lo degrada a `any`, que es justo lo que
- * luego nois传出 los tipos.
+ * Ya no hay ni `RateLimiter` ni `TokenManager`: en su lugar están el
+ * `Throttle` (que se guía por las cabeceras de cuota) y el proveedor de token de
+ * aplicación (`app-token.ts`). Los tests los sustituyen por versiones que no
+ * esperan de verdad, con `instantThrottle` y `stubAppTokens`.
  */
+
 type FetchInput = Parameters<typeof fetch>[0]
 type FetchInit = Parameters<typeof fetch>[1]
 
@@ -66,13 +60,31 @@ function buildResponse(spec: FakeResponse): Response {
 }
 
 /**
+ * Cabeceras de cuota que devuelve la API real.
+ *
+ * Se añaden a todas las respuestas del `fetch` falso por defecto porque el
+ * `Throttle` las lee en cada respuesta: sin ellas, cada petición parece la
+ * primera y no hay forma de probar el ritmo.
+ */
+export const QUOTA_HEADERS: Record<string, string> = {
+  'x-secondly-ratelimit-limit': '2',
+  'x-secondly-ratelimit-remaining': '2',
+  'x-hourly-ratelimit-limit': '1200',
+  'x-hourly-ratelimit-remaining': '1197',
+}
+
+/**
  * Crea un `fetch` falso.
  *
  * @param queue Respuestas por orden. Se recyclean: si se acaba la lista, la
  *              última se repite indefinidamente. Así un test de reintentos
  *              puede declarar "429, 429, 200" y ya está.
+ * @param defaults Cabeceras que se añaden a cada respuesta.
  */
-export function createFakeFetch(queue: readonly FakeResponse[]): FakeFetch {
+export function createFakeFetch(
+  queue: readonly FakeResponse[],
+  defaults: Record<string, string> = {},
+): FakeFetch {
   const calls: RecordedCall[] = []
   let index = 0
 
@@ -96,7 +108,7 @@ export function createFakeFetch(queue: readonly FakeResponse[]): FakeFetch {
       })
     }
 
-    return buildResponse(spec)
+    return buildResponse({ ...spec, headers: { ...defaults, ...spec.headers } })
   }) as typeof fetch
 
   return {
@@ -129,22 +141,6 @@ export function createFakeClock(start = 1_700_000_000_000) {
   }
 }
 
-/**
- * Limitador que no espera de verdad.
- *
- * Los límites se prueban con el reloj manual; aquí solo se neutraliza el
- * `sleep` para que el test no tarde 550 ms por llamada.
- */
-export function instantRateLimiter(
-  overrides: { maxPerMinute?: number; minDelayMs?: number } = {},
-): RateLimiter {
-  return new RealRateLimiter({
-    minDelayMs: overrides.minDelayMs ?? 0,
-    maxPerMinute: overrides.maxPerMinute ?? 10_000,
-    sleep: async () => undefined,
-  })
-}
-
 /** `sleep` que no espera y anota cuánto se le pidió dormir. */
 export function createFakeSleep() {
   const waits: number[] = []
@@ -156,14 +152,58 @@ export function createFakeSleep() {
   }
 }
 
-/** Gestor de token preconfigurado, sin llamadas de red. */
-export function fakeTokenManager(accessToken = 'token-de-app'): TokenManager {
-  return new TokenManager({
-    tokenUrl: 'http://api.test/oauth/token',
-    uid: 'uid',
-    secret: 'secret',
-    userAgent: 'test/1.0',
-    fetchImpl: createFakeFetch([{ body: { access_token: accessToken, expires_in: 3600 } }])
-      .fetchImpl,
-  })
+/**
+ * `Throttle` que no espera de verdad.
+ *
+ * El ritmo se prueba con el reloj manual en `throttle.test.ts`; aquí solo se
+ * neutraliza la espera para que un test con tres peticiones no tarde medio
+ * segundo. `observe` se sigue contando para que los tests puedan mirar la cuota
+ * restante.
+ */
+export function instantThrottle(minIntervalMs = 0) {
+  const waits: number[] = []
+  let startedAt = 0
+  let hourlyRemaining = 1200
+
+  return {
+    throttle: {
+      before: async (): Promise<void> => {
+        const wait = Math.max(0, minIntervalMs - (Date.now() - startedAt))
+        waits.push(wait)
+        startedAt = Date.now() + wait
+      },
+      observe: (headers: Headers): void => {
+        const remaining = headers.get('x-hourly-ratelimit-remaining')
+
+        if (remaining !== null) {
+          hourlyRemaining = Number(remaining)
+        }
+      },
+      hourlyRemaining: () => hourlyRemaining,
+      pendingDelayMs: () => 0,
+    },
+    waits,
+  }
+}
+
+/**
+ * Proveedor de token de aplicación preconfigurado, sin llamadas de red.
+ *
+ * Devuelve siempre el mismo token, que es justo lo que se quiere en un test de
+ * `src/api`: la diferencia con el proveedor real ya tiene su propio test, contra
+ * el endpoint de token.
+ */
+export function stubAppTokens(accessToken = 'token-de-app') {
+  let invalidations = 0
+
+  return {
+    provider: {
+      getToken: async (): Promise<string> => accessToken,
+      invalidate: (): void => {
+        invalidations += 1
+      },
+    },
+    /** Cuántas veces se ha pedido tirar el token a la basura. */
+    invalidations: () => invalidations,
+  }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api/index.js'
 import Avatar from './Avatar.jsx'
 
@@ -17,27 +17,77 @@ function rank(peer) {
   return 3
 }
 
+/**
+ * Normaliza lo que devuelve `getPeers`.
+ *
+ * El back devuelve `{ peers, total, partial }` (el total vive en la cabecera
+ * `X-Total-Participants` y el estado de la descarga en `X-Partial`), y el mock
+ * devuelve la lista tal cual, como dice `docs/api.md`. De aquí sale lo mismo
+ * para los dos, y el resto del componente no se entera de cuál es cuál.
+ */
+function normalizar(respuesta) {
+  if (Array.isArray(respuesta)) {
+    return { peers: respuesta, total: respuesta.length, partial: false }
+  }
+
+  return {
+    peers: respuesta.peers ?? [],
+    total: respuesta.total ?? undefined,
+    partial: respuesta.partial === true,
+  }
+}
+
 export default function PeerList({ project }) {
   const [peers, setPeers] = useState([])
+  const [total, setTotal] = useState(undefined)
+  const [partial, setPartial] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
   const [typeFilter, setTypeFilter] = useState('all') // 'all' | 'finished' | 'in_progress'
   const [onlyOnDuty, setOnlyOnDuty] = useState(false)
   const [groupTherapyOpen, setGroupTherapyOpen] = useState(false)
   const [copied, setCopied] = useState(false)
 
-  useEffect(() => {
+  const cargar = useCallback(async () => {
     setLoading(true)
+    setError(null)
+
+    try {
+      const { peers: lista, total: totalParticipantes, partial: quedanPaginas } = normalizar(
+        await api.getPeers(project.id),
+      )
+      setPeers(lista)
+      setTotal(totalParticipantes)
+      setPartial(quedanPaginas)
+    } catch (err) {
+      setError(err?.network === true ? err.message : `No se pudieron cargar (${err.message}).`)
+    } finally {
+      setLoading(false)
+    }
+  }, [project.id])
+
+  useEffect(() => {
+    setPeers([])
+    setTotal(undefined)
+    setPartial(false)
     setTypeFilter('all')
     setOnlyOnDuty(false)
     setGroupTherapyOpen(false)
     setCopied(false)
-    api.getPeers(project.id).then((p) => {
-      setPeers(p)
-      setLoading(false)
-    })
-  }, [project.id])
+    cargar()
+  }, [cargar])
 
   if (loading) return <p>Cargando compañeros...</p>
+
+  if (error) {
+    return (
+      <section>
+        <h2>Quién te puede atender en {project.name}</h2>
+        <p className="estado error">{error}</p>
+        <button className="pill" onClick={cargar}>Volver a probar</button>
+      </section>
+    )
+  }
 
   const onDutyCount = peers.filter(onDuty).length
   const onDutySpecialists = peers.filter((p) => onDuty(p) && p.status === 'finished').length
@@ -82,6 +132,19 @@ export default function PeerList({ project }) {
         </p>
       ) : (
         <p className="count">Hoy no hay nadie de guardia en este proyecto. ¿Y si te pones tú?</p>
+      )}
+      {peers.length > 0 && (
+        <p className="total">
+          {total !== undefined && total > peers.length
+            ? `${peers.length} de ${total} participantes pueden atenderte ahora mismo.`
+            : `${peers.length === 1 ? '1 persona' : `${peers.length} personas`} pueden atenderte ahora mismo.`}
+        </p>
+      )}
+      {partial && (
+        <p className="total aviso">
+          Estamos bajando la lista poco a poco (la API de 42 va despacio) y aún faltan personas.
+          Vuelve a entrar en un rato y habrá más.
+        </p>
       )}
       {peers.length === 0 && <p>Ahora mismo no hay nadie en este turno... pero puedes volver a preguntar más tarde.</p>}
       <div className="filters">

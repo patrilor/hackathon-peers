@@ -3,22 +3,36 @@
  *
  * Se puede testear entero sin levantar un servidor ni abrir un navegador. Las
  * rutas se limitan a traducir cookies y redirecciones.
+ *
+ * ## Sesión sin tabla
+ *
+ * La sesión vive **dentro de la cookie firmada**, no en la base de datos. Antes
+ * la cookie llevaba un identificador opaco y había una tabla `sessions` que lo
+ * guardaba; aquí va el perfil (login, nombre y avatar) firmado con HMAC.
+ *
+ * Lo que se gana:
+ *
+ * - Una tabla menos. La base se queda con lo que de verdad es dato.
+ * - Ninguna consulta por petición. `/auth/me` y las rutas de datos ya no tocan
+ *   la base para saber quién eres.
+ * - Sin token de 42 que guardar ni que refrescar. El token de usuario solo se
+ *   usa durante el login, para llamar a `/v2/me`, y se tira.
+ *
+ * Lo que se pierde, y hay que decirlo claro: **no se puede revocar una sesión**
+ * antes de que caduque. Si alguien copia la cookie, sigue dentro hasta que
+ * expire. Para una web de la intra con la vida de 12 h es un riesgo
+ * razonable; para algo con datos sensibles no lo sería, y la vuelta atrás es
+ * volver a meter la tabla `sessions`.
  */
 
 import type { ApiUser } from '../domain/types.js'
-import { toUserInput } from '../db/repositories/users.js'
+import { avatarUrlOf } from '../domain/avatar.js'
 import { domainError } from '../domain/errors.js'
 import { createPkcePair } from './oauth-client.js'
 import type { OAuthClient } from './oauth-client.js'
-import { createSessionsRepository } from './sessions.js'
-import type { UsersRepository } from '../db/repositories/users.js'
-import type { Db } from '../db/database.js'
 import { randomToken, sign, verify } from './signed-cookie.js'
 
 export type AuthServiceOptions = {
-  db: Db
-  /** Para replicar a la persona antes de abrir sesión (FK de `sessions`). */
-  users: UsersRepository
   oauth: OAuthClient
   /** Secreto de `SESSION_SECRET`, para firmar. */
   secret: string
@@ -29,6 +43,15 @@ export type AuthServiceOptions = {
   /** Url a la que se vuelve al terminar el login. */
   frontendUrl: string
   now?: () => number
+}
+
+/** Lo que va dentro de la cookie de sesión. */
+export type SessionUser = {
+  login: string
+  /** Nombre para la cabecera. Puede venir `null` si la persona no lo tiene. */
+  name: string | null
+  /** Avatar ya resuelto a URL, o `null`. */
+  image: string | null
 }
 
 /** Valor del cookie de estado, ya serializado. */
@@ -42,7 +65,6 @@ const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000
 const DEFAULT_STATE_TTL_MS = 10 * 60 * 1000
 
 export function createAuthService(options: AuthServiceOptions) {
-  const sessions = createSessionsRepository(options.db)
   const now = options.now ?? Date.now
   const sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS
   const stateTtlMs = options.stateTtlMs ?? DEFAULT_STATE_TTL_MS
@@ -56,10 +78,9 @@ export function createAuthService(options: AuthServiceOptions) {
 
   /** Lo que hay que devolver a `/auth/callback`. */
   type LoginResult = {
-    sessionId: string
     login: string
     image: string | null
-    /** Cookie de sesión. */
+    /** Cookie de sesión ya firmada. */
     sessionCookie: string
     /** Dónde manda el navegador al terminar. */
     redirectUrl: string
@@ -68,8 +89,8 @@ export function createAuthService(options: AuthServiceOptions) {
   /**
    * Paso 1: generar `state` y PKCE, y devolver la URL de la 42.
    *
-   * El `state` va en una cookie firmada, no en la base: si no vuelve, no hay
-   * nada que limpiar, y el navegador lo manda solo al volver a este dominio.
+   * El `state` va en una cookie firmada, no en la base: si no vuelve, no hay nada
+   * que limpiar, y el navegador lo manda solo al volver a este dominio.
    */
   function startLogin(): LoginStart {
     const state = randomToken()
@@ -90,6 +111,11 @@ export function createAuthService(options: AuthServiceOptions) {
   /**
    * Paso 2: canjear el código y abrir sesión.
    *
+   * Son dos peticiones a la 42 y ni una más: el canje del código y un
+   * `GET /v2/me`. El token de usuario que devuelve el canje se usa para esa
+   * llamada y se queda ahí; a partir de ahí todo lo demás va con el token de la
+   * aplicación, que es público.
+   *
    * @throws {DomainError} 400 si el `state` no cuadra o ha caducado, que es un
    * intento de CSRF o un enlace de login reutilizado.
    */
@@ -109,95 +135,111 @@ export function createAuthService(options: AuthServiceOptions) {
       throw domainError('invalid_input', 'El `state` de login no coincide')
     }
 
-    const result = await options.oauth.completeLogin({
+    const { profile } = await options.oauth.completeLogin({
       code: params.code,
       verifier: payload.verifier,
     })
 
-    const profile: ApiUser = result.profile
-
-    return openSession(profile, result.accessToken, result.expiresInSeconds)
+    return openSession(profile)
   }
 
   /**
-   * Abre sesión para un perfil ya leído de la API.
+   * Firma la cookie de sesión con el perfil recién leído.
    *
-   * La persona se replica antes: `sessions` tiene clave foránea contra
-   * `users`, y sin esta fila la inserción fallaría.
+   * El `expires` va **dentro** del valor firmado, y no solo en el `Max-Age` de la
+   * cookie: si solo estuviera en el `Max-Age`, alguien con la clave del servidor
+   * (o un descuido al copiar la cookie) podría quitar la caducidad y tener una
+   * sesión eterna. Al ir firmado, no se puede tocar sin romper la firma.
    */
-  function openSession(
-    profile: ApiUser,
-    accessToken: string,
-    expiresInSeconds: number | undefined,
-  ): LoginResult {
-    options.users.upsertMany([toUserInput(profile)])
+  function openSession(profile: ApiUser): LoginResult {
+    const user: SessionUser = {
+      login: profile.login,
+      name: fullNameOf(profile),
+      // Se usa el helper de `domain/avatar.ts` y no `image.url`: la API de 42 no
+      // tiene ninguna clave `url` en el avatar de los usuarios, así que eso
+      // devolvía siempre `null`.
+      image: avatarUrlOf(profile.image),
+    }
 
-    // La sesión no puede vivir más que el token: si el token caduca antes,
-    // las llamadas empezarían a fallar con un 401 sin explicación.
-    const tokenTtlMs = (expiresInSeconds ?? 0) * 1000
-    const ttl = tokenTtlMs > 0 ? Math.min(tokenTtlMs, sessionTtlMs) : sessionTtlMs
-
-    const session = sessions.create(profile.login, {
-      accessToken,
-      expiresAt: now() + ttl,
-    })
+    const expiresAt = now() + sessionTtlMs
+    const payload = Buffer.from(JSON.stringify({ ...user, exp: expiresAt })).toString('base64url')
 
     return {
-      sessionId: session.sessionId,
-      login: session.login,
-      image: profile.image?.url ?? null,
-      sessionCookie: sign(options.secret, session.sessionId),
+      login: user.login,
+      image: user.image,
+      sessionCookie: sign(options.secret, payload),
       redirectUrl: options.frontendUrl,
     }
   }
 
-  /** Sesión de una cookie, o `undefined` si no hay o caducó. */
-  function readSession(sessionCookie: string | undefined) {
+  /**
+   * Persona de la sesión actual, o `undefined` si no hay o caducó.
+   *
+   * No toca la base de datos: todo lo que hace falta está en la cookie firmada.
+   */
+  function readSession(sessionCookie: string | undefined): SessionUser | undefined {
     if (sessionCookie === undefined) {
       return undefined
     }
 
-    const sessionId = verify(options.secret, sessionCookie)
+    const raw = verify(options.secret, sessionCookie)
 
-    if (sessionId === undefined) {
+    if (raw === undefined) {
       // Cookie manipulada: no se distingue de una caducada, y no hace falta.
       return undefined
     }
 
-    return sessions.findValid(sessionId, now())
+    let parsed: unknown
+
+    try {
+      parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'))
+    } catch {
+      return undefined
+    }
+
+    // El `exp` va dentro del mismo payload firmado, así que se valida aquí y no
+    // solo con el `Max-Age` de la cookie: el navegador puede ignorar la fecha si
+    // alguien manipula la cookie a mano.
+    const expiresAt = readExpiresAt(parsed)
+
+    if (expiresAt === undefined) {
+      return undefined
+    }
+
+    const user = readSessionUser(parsed)
+
+    if (user === undefined || now() > expiresAt) {
+      return undefined
+    }
+
+    return user
   }
 
-  /** Persona de la sesión actual. Lanza 401 si no hay. */
-  function currentUser(sessionCookie: string | undefined): {
-    login: string
-    accessToken: string
-    sessionId: string
-  } {
-    const session = readSession(sessionCookie)
+  /**
+   * Persona de la sesión actual. Lanza 401 si no hay.
+   *
+   * Antes devolvía también el `access_token` de la persona. Ya no: el back
+   * habla con la 42 con el token de la aplicación, y el de la persona solo hizo
+   * falta durante el login.
+   */
+  function currentUser(sessionCookie: string | undefined): SessionUser {
+    const user = readSession(sessionCookie)
 
-    if (session === undefined) {
+    if (user === undefined) {
       throw domainError('unauthenticated', 'No hay sesión iniciada')
     }
 
-    return {
-      login: session.login,
-      accessToken: session.accessToken,
-      sessionId: session.sessionId,
-    }
+    return user
   }
 
-  /** Cierra la sesión. Idempotente: cerrar dos veces no es un error. */
-  function logout(sessionCookie: string | undefined): void {
-    const session = readSession(sessionCookie)
-
-    if (session !== undefined) {
-      sessions.destroy(session.sessionId)
-    }
-  }
-
-  /** Limpieza de las caducadas. Se llama al arrancar. */
-  function purgeExpiredSessions(): number {
-    return sessions.purgeExpired(now())
+  /**
+   * Cierra la sesión.
+   *
+   * Sin tabla de sesiones no hay nada que borrar en el servidor: basta con
+   * vaciar la cookie, y el navegador la tira. Idempotente.
+   */
+  function logout(): void {
+    // Deliberadamente vacío. Ver `logout` en `http/auth-routes.ts`.
   }
 
   function readState(stateCookie: string | undefined): StatePayload | undefined {
@@ -245,9 +287,71 @@ export function createAuthService(options: AuthServiceOptions) {
     readSession,
     currentUser,
     logout,
-    purgeExpiredSessions,
-    sessions,
+    /** Vida de la sesión, para que la ruta ponga el mismo `Max-Age`. */
+    sessionTtlMs,
   }
+}
+
+/**
+ * Lee el perfil de la cookie, validando la forma.
+ *
+ * Se valida campo a campo porque el valor viene de fuera: alguien podría mandar
+ * una cookie firmada correctamente pero con `login` en un sitio raro, y mejor
+ * devolver `undefined` que propagar algo que no es una persona.
+ */
+function readSessionUser(parsed: unknown): SessionUser | undefined {
+  if (typeof parsed !== 'object' || parsed === null || !('login' in parsed)) {
+    return undefined
+  }
+
+  const candidate = parsed as { login?: unknown; name?: unknown; image?: unknown }
+
+  if (typeof candidate.login !== 'string' || candidate.login === '') {
+    return undefined
+  }
+
+  return {
+    login: candidate.login,
+    name: typeof candidate.name === 'string' ? candidate.name : null,
+    image: typeof candidate.image === 'string' ? candidate.image : null,
+  }
+}
+
+/**
+ * Lee el instante de caducidad del payload de sesión.
+ *
+ * Va aparte de `readSessionUser` a propósito: son dos comprobaciones
+ * independientes, y así una no se pierde al reescribir la otra.
+ */
+function readExpiresAt(parsed: unknown): number | undefined {
+  if (typeof parsed !== 'object' || parsed === null || !('exp' in parsed)) {
+    return undefined
+  }
+
+  const exp = (parsed as { exp?: unknown }).exp
+
+  // `Number.isFinite` y no solo `typeof`: un `NaN` serializado pasa el `typeof` y
+  // haría que `now() > NaN` fuera `false`, es decir, sesión eternal.
+  return typeof exp === 'number' && Number.isFinite(exp) ? exp : undefined
+}
+
+/**
+ * Nombre legible de una persona.
+ *
+ * `usual_full_name` es lo que la 42 considera su nombre de siempre; si no está,
+ * se recurre al nombre y apellidos que trae el propio usuario. La API devuelve
+ * cualquiera de los tres en `null` sin avisar, así que se prueban en orden.
+ */
+function fullNameOf(profile: ApiUser): string | null {
+  if (typeof profile.usual_full_name === 'string' && profile.usual_full_name.trim() !== '') {
+    return profile.usual_full_name
+  }
+
+  const parts = [profile.first_name, profile.last_name].filter(
+    (part): part is string => typeof part === 'string' && part.trim() !== '',
+  )
+
+  return parts.length > 0 ? parts.join(' ') : null
 }
 
 /** Comparación de `state` en tiempo constante. */
@@ -259,8 +363,8 @@ function sameState(expected: string, provided: string): boolean {
   let diff = 0
 
   for (let index = 0; index < expected.length; index += 1) {
-    // XOR acumula las diferencias sin salir del bucle: comparar y salir
-    // en cuanto hay una es justamente lo que filtra el valor byte a byte.
+    // XOR acumula las diferencias sin salir del bucle: comparar y salir en
+    // cuanto hay una es justamente lo que filtra el valor byte a byte.
     diff |= expected.charCodeAt(index) ^ provided.charCodeAt(index)
   }
 

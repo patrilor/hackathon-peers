@@ -9,7 +9,6 @@ import type { FastifyInstance, FastifyRequest } from 'fastify'
 
 import { DomainError } from '../domain/errors.js'
 import type { AuthService } from '../auth/auth-service.js'
-import type { UsersService } from '../services/users.js'
 import { mapError } from './errors.js'
 import {
   OAUTH_STATE_COOKIE_NAME,
@@ -22,19 +21,15 @@ import {
 
 export type AuthRoutesOptions = {
   auth: AuthService
-  /** Para leer `{ login, image }` de la réplica local. */
-  users: UsersService
-  /** A dónde se vuelve al terminar el login, y en caso de fallo. */
+  /** A dónde se vuelve al terminar el login, y a dónde se va si falla. */
   frontendUrl: string
   /** Vida de la cookie de estado, para borrarla con la misma caducidad. */
   stateTtlMs?: number
-  sessionTtlMs?: number
 }
 
 export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOptions) {
-  const { auth, users, frontendUrl } = options
+  const { auth } = options
   const stateTtlMs = options.stateTtlMs ?? 10 * 60 * 1000
-  const sessionTtlMs = options.sessionTtlMs ?? 12 * 60 * 60 * 1000
 
   function cookieOf(request: FastifyRequest, name: string): string | undefined {
     return readCookie(request.headers.cookie, name)
@@ -51,12 +46,28 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
     return clearCookie(OAUTH_STATE_COOKIE_NAME, { maxAgeMs: 0, path: '/' })
   }
 
+  /**
+   * `Set-Cookie` de la sesión.
+   *
+   * El `Max-Age` va aquí **y** dentro del valor firmado (ver `auth-service.ts`).
+   * Redundante a propósito: el `Max-Age` lo aplica el navegador, y el `exp`
+   * firmado lo comprueba el servidor. Con los dos, ni un reloj manipulado ni una
+   * cookie reescrita a mano sirven de algo.
+   */
   function sessionCookieHeader(value: string): string {
-    return serializeCookie(SESSION_COOKIE_NAME, value, { maxAgeMs: sessionTtlMs, path: '/' })
+    return serializeCookie(SESSION_COOKIE_NAME, value, {
+      maxAgeMs: auth.sessionTtlMs,
+      path: '/',
+    })
   }
 
-  /** Front con el motivo del fallo en la query, para poder mostrar un mensaje. */
-  function frontWithError(error: string, status: number): string {
+  /**
+   * Front con el motivo del fallo en la query, para poder mostrar un mensaje.
+   *
+   * La URL del front sale de la propia cookie de sesión cuando la hay (porque
+   * ahí viene `redirectUrl`), y si no, de lo que dejó el login.
+   */
+  function frontWithError(frontendUrl: string, error: string, status: number): string {
     const url = new URL(frontendUrl)
     url.searchParams.set('error', error)
     url.searchParams.set('status', String(status))
@@ -111,13 +122,16 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
         // veces. Y se manda la sesión, en la MISMA respuesta.
         setCookies(reply, [forgetState(), sessionCookieHeader(result.sessionCookie)])
 
-        return await reply.redirect(frontendUrl, 302)
+        return await reply.redirect(result.redirectUrl, 302)
       } catch (error) {
         const mapped = mapError(error)
         request.log.warn({ err: error }, 'fallo en el callback de OAuth')
         setCookies(reply, [forgetState()])
 
-        return await reply.redirect(frontWithError(mapped.body.error, mapped.status), 302)
+        return await reply.redirect(
+          frontWithError(options.frontendUrl, mapped.body.error, mapped.status),
+          302,
+        )
       }
     },
   )
@@ -126,25 +140,26 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRoutesOpti
    * `GET /auth/me` → la persona de la sesión.
    *
    * 401 sin sesión, tal y como dice `docs/api.md`.
+   *
+   * Se lee de la cookie firmada, no de la API de 42 ni de la base: el perfil se
+   * copió en ella al hacer el login, así que recargar la web no gasta nada.
    */
   app.get('/auth/me', async (request, reply) => {
-    const sessionCookie = cookieOf(request, SESSION_COOKIE_NAME)
+    const user = auth.currentUser(cookieOf(request, SESSION_COOKIE_NAME))
 
-    if (sessionCookie === undefined) {
-      throw new DomainError('unauthenticated', 'No hay sesión iniciada')
-    }
-
-    // Valida la sesión. Si no está o caducó, `currentUser` lanza 401.
-    const { login } = auth.currentUser(sessionCookie)
-
-    // De la réplica local, no del token de 42: así una carga de página no
-    // gasta una llamada de la API.
-    return reply.send(users.getByLogin(login))
+    return reply.send({ login: user.login, name: user.name, image: user.image })
   })
 
-  /** `POST /auth/logout` → borra la sesión. Idempotente. */
-  app.post('/auth/logout', async (request, reply) => {
-    auth.logout(cookieOf(request, SESSION_COOKIE_NAME))
+  /**
+   * `POST /auth/logout` → borra la sesión. Idempotente.
+   *
+   * Sin tabla de sesiones no hay nada que borrar en el servidor: la sesión
+   * estaba en la cookie, así que vaciarla es todo el logout. Quien copió la
+   * cookie sigue dentro hasta que caduque; es el precio de no tener sesiones
+   * revocables, y está anotado en `auth-service.ts`.
+   */
+  app.post('/auth/logout', async (_request, reply) => {
+    auth.logout()
     reply.header('Set-Cookie', clearCookie(SESSION_COOKIE_NAME, { maxAgeMs: 0, path: '/' }))
 
     return reply.code(204).send()

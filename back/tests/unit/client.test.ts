@@ -1,387 +1,243 @@
 /**
  * Tests del cliente de la API de 42.
  *
- * Se prueba lo que de verdad falla en producción: el 429, el 500, el token
- * caducado y la paginación. Todos los escenarios verificados contra la API
- * real durante la investigación.
+ * Lo que más importa aquí es la paginación y el presupuesto de tiempo: el
+ * proyecto 2689 son 21 páginas y la API va a 2 peticiones por segundo, así que
+ * cualquier cambio en cómo se piden las páginas se nota en la latencia que ve
+ * quien está usando la web.
  */
 
 import { describe, expect, it } from 'vitest'
 
 import { FortyTwoClient } from '../../src/api/client.js'
-import { ApiError } from '../../src/api/errors.js'
-import {
-  createFakeFetch,
-  createFakeSleep,
-  fakeTokenManager,
-  instantRateLimiter,
-} from '../helpers/fake-api.js'
+import { createThrottle } from '../../src/api/throttle.js'
+import { createFakeFetch, createFakeSleep, stubAppTokens } from '../helpers/fake-api.js'
 
-type FetchInput = Parameters<typeof fetch>[0]
-type FetchInit = Parameters<typeof fetch>[1]
+const BASE = 'https://api.intra.42.fr/v2'
 
-/** Cliente de pruebas, con todo inyectado. */
 function makeClient(
   queue: Parameters<typeof createFakeFetch>[0],
-  overrides: { pageSize?: number; maxRetries?: number } = {},
+  overrides: {
+    pageSize?: number
+    maxRetries?: number
+    quota?: Record<string, string>
+  } = {},
 ) {
-  const fake = createFakeFetch(queue)
-  const { waits, sleep } = createFakeSleep()
+  const fake = createFakeFetch(queue, {
+    'x-secondly-ratelimit-limit': '2',
+    'x-secondly-ratelimit-remaining': '2',
+    'x-hourly-ratelimit-limit': '1200',
+    'x-hourly-ratelimit-remaining': '1197',
+    ...overrides.quota,
+  })
+  const { sleep, waits } = createFakeSleep()
+  const tokens = stubAppTokens()
 
   const client = new FortyTwoClient({
-    apiV2Base: 'https://api.test/v2',
-    userAgent: 'sanatorio-42-test/1.0',
+    apiV2Base: BASE,
+    userAgent: 'test/1.0',
     timeoutMs: 1_000,
     pageSize: overrides.pageSize ?? 100,
-    limiter: instantRateLimiter(),
-    tokens: fakeTokenManager(),
-    tokenProvider: async () => 'token-de-app',
+    // Sin espera: el ritmo se prueba en `throttle.test.ts` con reloj falso.
+    throttle: createThrottle({ minIntervalMs: 0, sleep }),
+    tokens: tokens.provider,
     fetchImpl: fake.fetchImpl,
-    maxRetries: overrides.maxRetries ?? 3,
+    maxRetries: overrides.maxRetries ?? 2,
     sleep,
   })
 
-  return { client, fake, waits }
+  return { client, fake, waits, tokens }
 }
 
-describe('peticiones básicas', () => {
-  it('añade la raíz de la API a la ruta', async () => {
-    const { client, fake } = makeClient([{ body: { id: 1, login: 'albrodri' } }])
+describe('cliente de 42', () => {
+  describe('cabeceras y autenticación', () => {
+    it('manda el token, el User-Agent y pide JSON', async () => {
+      const { client, fake } = makeClient([{ body: [] }])
 
-    await client.getUser('albrodri')
+      await client.getProjectParticipantsPage(2689)
 
-    expect(fake.urls()[0]).toBe('https://api.test/v2/users/albrodri')
-  })
+      const headers = fake.headersOf(0)
+      expect(headers.Authorization).toBe('Bearer token-de-app')
+      expect(headers['User-Agent']).toBe('test/1.0')
+      expect(headers.Accept).toBe('application/json')
+    })
 
-  it('manda el token y el User-Agent en cada petición', async () => {
-    const { client, fake } = makeClient([{ body: { id: 1, login: 'albrodri' } }])
+    it('filtra por proyecto y pide una página concreta', async () => {
+      const { client, fake } = makeClient([{ body: [] }])
 
-    await client.getUser('albrodri')
+      await client.getProjectParticipantsPage(2689, 7)
 
-    // Sin User-Agent, la 42 responde 403 con el cuerpo vacío.
-    const headers = fake.headersOf(0)
-    expect(headers.Authorization).toBe('Bearer token-de-app')
-    expect(headers['User-Agent']).toBe('sanatorio-42-test/1.0')
-  })
+      // `filter[project_id]` con corchetes sin codificar: es como lo acepta la 42.
+      expect(fake.urls()[0]).toBe(`${BASE}/projects_users?filter[project_id]=2689&page=7&per_page=100`)
+    })
 
-  it('escapa los logins con caracteres raros', async () => {
-    const { client, fake } = makeClient([{ body: { id: 1, login: 'a/b' } }])
+    it('codifica el login en la URL de proyectos', async () => {
+      const { client, fake } = makeClient([{ body: [] }])
 
-    await client.getUser('a/b')
+      await client.getUserProjects('albrodri')
 
-    expect(fake.urls()[0]).toBe('https://api.test/v2/users/a%2Fb')
-  })
-
-  it('usa el token de usuario cuando se le pasa explícitamente', async () => {
-    const { client, fake } = makeClient([{ body: { id: 1, login: 'albrodri' } }])
-
-    await client.getMe('token-de-usuario')
-
-    expect(fake.headersOf(0).Authorization).toBe('Bearer token-de-usuario')
-  })
-
-  it('devuelve el cuerpo parseado como JSON', async () => {
-    const { client } = makeClient([{ body: { id: 42, login: 'albrodri', kind: 'student' } }])
-
-    await expect(client.getUser('albrodri')).resolves.toEqual({
-      id: 42,
-      login: 'albrodri',
-      kind: 'student',
+      expect(fake.urls()[0]).toContain('/users/albrodri/projects_users')
     })
   })
-})
 
-describe('reintentos', () => {
-  it('reintenta un 429 y sale con éxito', async () => {
-    const { client, fake } = makeClient([
-      { status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' },
-      { body: { id: 1, login: 'albrodri' } },
-    ])
+  describe('paginación', () => {
+    it('devuelve una página y su total, leyendo las cabeceras', async () => {
+      const { client } = makeClient([
+        {
+          body: [{ status: 'in_progress', user: { login: 'albrodri' } }],
+          headers: { 'x-total': '2047', 'x-per-page': '100' },
+        },
+      ])
 
-    await expect(client.getUser('albrodri')).resolves.toMatchObject({ login: 'albrodri' })
-    expect(fake.calls).toHaveLength(2)
+      const page = await client.getProjectParticipantsPage(2689)
+
+      expect(page.total).toBe(2047)
+      expect(page.perPage).toBe(100)
+      expect(page.items).toHaveLength(1)
+    })
+
+    it('asume que es todo si la API no manda X-Total', async () => {
+      const { client } = makeClient([{ body: [{ status: 'in_progress' }, { status: 'finished' }] }])
+
+      const page = await client.getProjectParticipantsPage(2689)
+
+      // Sin `X-Total` se asume que lo que ha venido es el proyecto completo: es
+      // mejor servir lo que hay que no servir nada.
+      expect(page.total).toBe(2)
+    })
+
+    it('rechaza una respuesta que no es una lista', async () => {
+      const { client } = makeClient([{ body: { error: 'nope' } }])
+
+      await expect(client.getProjectParticipantsPage(2689)).rejects.toThrow(/no ha devuelto una lista/)
+    })
+
+    it('recorre todas las páginas de los proyectos de una persona', async () => {
+      const { client, fake } = makeClient(
+        [
+          {
+            body: Array.from({ length: 100 }, (_, index) => ({
+              status: 'in_progress',
+              project: { id: index },
+            })),
+            headers: { 'x-total': '101', 'x-per-page': '100' },
+          },
+          { body: [{ status: 'in_progress', project: { id: 100 } }], headers: { 'x-total': '101' } },
+        ],
+        { pageSize: 100 },
+      )
+
+      const projects = await client.getUserProjects('albrodri')
+
+      expect(projects).toHaveLength(101)
+      // Dos peticiones: la segunda, al venir corta, significa "ya no hay más".
+      expect(fake.calls).toHaveLength(2)
+      expect(fake.urls()[1]).toContain('page=2')
+    })
+
+    it('no pide una segunda página si la primera vino corta', async () => {
+      const { client, fake } = makeClient([{ body: [{ status: 'in_progress', project: { id: 1 } }] }])
+
+      await client.getUserProjects('albrodri')
+
+      // El atajo de `per_page` alto: pedir la siguiente habría sido gastar una
+      // de las 1 200 peticiones por hora para confirmar que no hay nada.
+      expect(fake.calls).toHaveLength(1)
+    })
   })
 
-  it('reintenta varios 429 seguidos', async () => {
-    const { client, fake } = makeClient([
-      { status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' },
-      { status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' },
-      { status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' },
-      { body: { id: 1, login: 'albrodri' } },
-    ])
+  describe('errores', () => {
+    it('reintenta un 429 y lo consigue', async () => {
+      const { client, fake } = makeClient([
+        { status: 429, headers: { 'retry-after': '1' } },
+        { body: [{ status: 'in_progress' }], headers: { 'x-total': '1' } },
+      ])
 
-    await expect(client.getUser('albrodri')).resolves.toMatchObject({ login: 'albrodri' })
-    expect(fake.calls).toHaveLength(4)
+      const page = await client.getProjectParticipantsPage(2689)
+
+      expect(page.items).toHaveLength(1)
+      expect(fake.calls).toHaveLength(2)
+    })
+
+    it('respeta el Retry-After que manda la API', async () => {
+      const { client, waits } = makeClient([
+        { status: 429, headers: { 'retry-after': '2' } },
+        { body: [], headers: { 'x-total': '0' } },
+      ])
+
+      await client.getProjectParticipantsPage(2689)
+
+      // La API dice cuándo puede volver: se le hace caso y no se cuenta por
+      // nuestra cuenta.
+      expect(waits).toEqual([2_000])
+    })
+
+    it('reintenta un 503 y al final lo declara', async () => {
+      const { client, fake } = makeClient([{ status: 503, text: 'service unavailable' }])
+
+      await expect(client.getProjectParticipantsPage(2689)).rejects.toThrow()
+
+      // Primero + 2 reintentos: los que dice `maxRetries`.
+      expect(fake.calls).toHaveLength(3)
+    })
+
+    it('no reintenta un 404, porque repetir no lo va a arreglar', async () => {
+      const { client, fake } = makeClient([{ status: 404, text: '{"error":"not_found"}' }])
+
+      await expect(client.getProjectParticipantsPage(999_999)).rejects.toThrow()
+
+      // Una sola petición: el `services/projects.ts` distingue el 404 del resto
+      // para dar un mensaje de "proyecto no encontrado" en lugar de un 502.
+      expect(fake.calls).toHaveLength(1)
+    })
+
+    it('tira el token en un 401, por si estuviera caducado', async () => {
+      const { client, fake, tokens } = makeClient([{ status: 401, text: '{"error":"unauthorized"}' }])
+
+      await expect(client.getProjectParticipantsPage(2689)).rejects.toThrow()
+
+      expect(tokens.invalidations()).toBe(1)
+      // Un 401 con token de app no se arregla repitiendo con el mismo.
+      expect(fake.calls).toHaveLength(1)
+    })
+
+    it('convierte un fallo de red en un error propio, sin reintentar de más', async () => {
+      const { client } = makeClient([{ throws: new TypeError('fetch failed') }])
+
+      await expect(client.getProjectParticipantsPage(2689)).rejects.toThrow()
+    })
+
+    it('propaga un timeout como timeout', async () => {
+      const { client } = makeClient([{ throws: new DOMException('timeout', 'TimeoutError') }])
+
+      await expect(client.getProjectParticipantsPage(2689)).rejects.toThrow(/timeout|Timed out/i)
+    })
   })
 
-  it('reintenta un 500', async () => {
-    const { client } = makeClient([
-      { status: 500, text: '' },
-      { body: { id: 1, login: 'albrodri' } },
-    ])
-
-    await expect(client.getUser('albrodri')).resolves.toMatchObject({ login: 'albrodri' })
-  })
-
-  it('reintenta un error de red', async () => {
-    const { client, fake } = makeClient([
-      { throws: new Error('ECONNRESET') },
-      { body: { id: 1, login: 'albrodri' } },
-    ])
-
-    await expect(client.getUser('albrodri')).resolves.toMatchObject({ login: 'albrodri' })
-    expect(fake.calls).toHaveLength(2)
-  })
-
-  it('NO reintenta un 404: reintentarlo solo gasta cuota', async () => {
-    const { client, fake } = makeClient([{ status: 404, text: '{}' }])
-
-    await expect(client.getUser('noexiste')).rejects.toBeInstanceOf(ApiError)
-    // Una sola llamada, ni una más.
-    expect(fake.calls).toHaveLength(1)
-  })
-
-  it('NO reintenta un 403', async () => {
-    const { client, fake } = makeClient([{ status: 403, text: '' }])
-
-    await expect(client.getUser('albrodri')).rejects.toMatchObject({ code: 'forbidden' })
-    expect(fake.calls).toHaveLength(1)
-  })
-
-  it('se rinde tras agotar los reintentos', async () => {
-    const { client, fake } = makeClient(
-      [
-        { status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' },
-        { status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' },
-        { status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' },
-        { status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' },
-      ],
-      { maxRetries: 3 },
+  it('sigue funcionando con la cuota por hora casi agotada', async () => {
+    // Con 3 peticiones por hora restantes, la API está a punto de cortar. Un 429
+    // aquí no es un problema del cliente, así que la petición debe salir bien y
+    // el servicio que llama puede mirar el aviso.
+    const { client } = makeClient(
+      [{ body: [], headers: { 'x-total': '0', 'x-hourly-ratelimit-remaining': '3' } }],
+      { quota: { 'x-hourly-ratelimit-remaining': '3' } },
     )
 
-    await expect(client.getUser('albrodri')).rejects.toMatchObject({ code: 'rate_limited' })
-    // El intento original más 3 reintentos.
-    expect(fake.calls).toHaveLength(4)
+    const page = await client.getProjectParticipantsPage(2689)
+
+    expect(page.items).toEqual([])
   })
 
-  it('respeta el Retry-After que manda la API', async () => {
-    const { client, waits } = makeClient([
-      { status: 429, text: '{}', headers: { 'retry-after': '7' } },
-      { body: { id: 1, login: 'albrodri' } },
-    ])
+  it('avisa del fallo con el endpoint, para poder localizarlo en los logs', async () => {
+    const { client } = makeClient([{ status: 500, text: 'boom' }])
 
-    await client.getUser('albrodri')
+    const error = await client.getProjectParticipantsPage(2689).catch((cause: unknown) => cause)
 
-    // Si la API dice 7 segundos, esperamos 7. No our backoff de 500 ms.
-    expect(waits).toEqual([7_000])
-  })
-
-  it('crece el backoff entre reintentos', async () => {
-    const { client, waits } = makeClient([
-      { status: 500, text: '' },
-      { status: 500, text: '' },
-      { status: 500, text: '' },
-      { body: { id: 1, login: 'albrodri' } },
-    ])
-
-    await client.getUser('albrodri')
-
-    expect(waits).toHaveLength(3)
-    expect(waits[0]).toBeGreaterThanOrEqual(500)
-    expect(waits[1]).toBeGreaterThanOrEqual(1_000)
-    expect(waits[2]).toBeGreaterThanOrEqual(2_000)
-  })
-
-  it('descarta el token en caché cuando la API responde 401', async () => {
-    const fake = createFakeFetch([
-      { status: 401, text: '{"message":"Unauthorized"}' },
-      { body: { id: 1, login: 'albrodri' } },
-    ])
-    const tokens = fakeTokenManager()
-
-    const client = new FortyTwoClient({
-      apiV2Base: 'https://api.test/v2',
-      userAgent: 'test/1.0',
-      timeoutMs: 1_000,
-      pageSize: 100,
-      limiter: instantRateLimiter(),
-      tokens,
-      fetchImpl: fake.fetchImpl,
-      maxRetries: 0,
-      sleep: async () => undefined,
-    })
-
-    tokens.peek()
-    await expect(client.getUser('albrodri')).rejects.toMatchObject({ code: 'unauthorized' })
-    expect(tokens.peek()).toBeNull()
-  })
-})
-
-describe('errores', () => {
-  it('mapea cada status a su código', async () => {
-    const cases = [
-      [400, 'bad_request'],
-      [401, 'unauthorized'],
-      [403, 'forbidden'],
-      [404, 'not_found'],
-      [429, 'rate_limited'],
-      [500, 'server_error'],
-      [503, 'server_error'],
-    ] as const
-
-    for (const [status, code] of cases) {
-      const { client } = makeClient([{ status, text: '{}' }], { maxRetries: 0 })
-      await expect(client.getUser('albrodri')).rejects.toMatchObject({ code })
-    }
-  })
-
-  it('usa el mensaje que devuelve la API', async () => {
-    const { client } = makeClient([{ status: 429, text: '{"error":"Spam Rate Limit Exceeded"}' }], {
-      maxRetries: 0,
-    })
-
-    await expect(client.getUser('albrodri')).rejects.toThrow('Spam Rate Limit Exceeded')
-  })
-
-  it('no se rompe si el cuerpo del error no es JSON', async () => {
-    // La 42 devuelve HTML vacío en algunos 403. El error debe seguir siendo útil.
-    const { client } = makeClient([{ status: 403, text: '<html>Forbidden</html>' }], {
-      maxRetries: 0,
-    })
-
-    await expect(client.getUser('albrodri')).rejects.toMatchObject({ code: 'forbidden' })
-  })
-
-  it('marca correctamente si el error es reintentable', () => {
-    const cases = [
-      [408, true],
-      [429, true],
-      [500, true],
-      [503, true],
-      [400, false],
-      [401, false],
-      [403, false],
-      [404, false],
-    ] as const
-
-    for (const [status, retryable] of cases) {
-      const error = new ApiError('x', status, { endpoint: '/x', code: 'server_error' })
-      expect(error.retryable).toBe(retryable)
-    }
-  })
-
-  it('incluye la ruta en el error, para poder localizarlo', async () => {
-    const { client } = makeClient([{ status: 404, text: '{}' }], { maxRetries: 0 })
-
-    await expect(client.getCampusUsers(22)).rejects.toMatchObject({
-      endpoint: '/v2/campus/22/users',
-    })
-  })
-})
-
-describe('paginación', () => {
-  it('recoge todas las páginas hasta que una viene incompleta', async () => {
-    const full = Array.from({ length: 100 }, (_, i) => ({ id: i, login: `user${i}` }))
-    const { client, fake } = makeClient(
-      [{ body: full }, { body: [{ id: 100, login: 'user100' }] }],
-      { pageSize: 100 },
-    )
-
-    const users = await client.getCampusUsers(22)
-
-    expect(users).toHaveLength(101)
-    expect(fake.urls()).toEqual([
-      'https://api.test/v2/campus/22/users?page=1&per_page=100',
-      'https://api.test/v2/campus/22/users?page=2&per_page=100',
-    ])
-  })
-
-  it('hace una sola petición si todo cabe en una página', async () => {
-    const { client, fake } = makeClient([{ body: [{ id: 1, login: 'albrodri' }] }])
-
-    await client.getCampusUsers(22)
-
-    expect(fake.calls).toHaveLength(1)
-  })
-
-  it('devuelve una lista vacía sin llamar si no hay nada', async () => {
-    const { client } = makeClient([{ body: [] }])
-
-    await expect(client.getCampusUsers(22)).resolves.toEqual([])
-  })
-
-  it('respeta el tamaño de página configurado', async () => {
-    const { client, fake } = makeClient([{ body: [] }], { pageSize: 50 })
-
-    await client.getCampusUsers(22)
-
-    expect(fake.urls()[0]).toContain('per_page=50')
-  })
-})
-
-describe('timeouts', () => {
-  it('mapea un timeout a un error tipado y reintentable', async () => {
-    const timeout = new Error('The operation was aborted')
-    timeout.name = 'TimeoutError'
-
-    const { client } = makeClient([{ throws: timeout }], { maxRetries: 0 })
-
-    await expect(client.getCampusUsers(22)).rejects.toMatchObject({
-      code: 'timeout',
+    // El endpoint va en el error: sin él, un 500 no dice ni qué llamada falló.
+    expect(error).toMatchObject({
+      endpoint: '/v2/projects_users',
+      code: 'server_error',
       retryable: true,
     })
-  })
-
-  it('usa el timeout pesado para /locations', async () => {
-    const fake = createFakeFetch([{ body: [] }])
-    const signals: (AbortSignal | undefined)[] = []
-
-    const spyingFetch = ((input: FetchInput, init?: FetchInit) => {
-      signals.push(init?.signal ?? undefined)
-      return fake.fetchImpl(input, init)
-    }) as typeof fetch
-
-    const client = new FortyTwoClient({
-      apiV2Base: 'https://api.test/v2',
-      userAgent: 'test/1.0',
-      timeoutMs: 30_000,
-      // Este endpoint se acerca al minuto: con 30 s revienta.
-      pageSize: 100,
-      limiter: instantRateLimiter(),
-      tokens: fakeTokenManager(),
-      tokenProvider: async () => 'token',
-      fetchImpl: spyingFetch,
-      sleep: async () => undefined,
-    })
-
-    await client.getCampusUsers(22)
-
-    // `AbortSignal.timeout` no expone el valor, pero sí la presencia de la señal.
-    expect(signals[0]).toBeInstanceOf(AbortSignal)
-  })
-
-  it('pasa una señal de aborto en todas las peticiones', async () => {
-    const fake = createFakeFetch([{ body: [] }])
-    const signals: (AbortSignal | undefined)[] = []
-    const spyingFetch = ((input: FetchInput, init?: FetchInit) => {
-      signals.push(init?.signal ?? undefined)
-      return fake.fetchImpl(input, init)
-    }) as typeof fetch
-
-    const client = new FortyTwoClient({
-      apiV2Base: 'https://api.test/v2',
-      userAgent: 'test/1.0',
-      timeoutMs: 1_000,
-      pageSize: 100,
-      limiter: instantRateLimiter(),
-      tokens: fakeTokenManager(),
-      tokenProvider: async () => 'token',
-      fetchImpl: spyingFetch,
-      sleep: async () => undefined,
-    })
-
-    await client.getCampusUsers(22)
-
-    expect(signals[0]).toBeInstanceOf(AbortSignal)
   })
 })

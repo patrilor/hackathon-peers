@@ -26,7 +26,6 @@ export type ApiErrorBody = {
 
 /** Detalle de por qué se reintentó o no, para logs y tests. */
 export type ApiErrorOptions = {
-  /** Ruta que se intentó llamar, sin el host. */
   /**
    * Ruta llamada, para localizar el fallo en el log.
    *
@@ -44,6 +43,14 @@ export type ApiErrorOptions = {
   body?: ApiErrorBody | undefined
   /** Segundos que la API pidió esperar, vía `Retry-After`. */
   retryAfterSeconds?: number | undefined
+  /**
+   * Cabeceras de la respuesta, si las hubo.
+   *
+   * Se guardan porque son la única forma de conocer la cuota que queda: la API
+   * de 42 manda `x-secondly-ratelimit-remaining` y `x-hourly-ratelimit-remaining`
+   * en **cada** respuesta, y un `429` es cuando más las necesitas.
+   */
+  headers?: Headers | undefined
   /** Error original, cuando el fallo fue de red o de timeout. */
   cause?: unknown
   /**
@@ -69,6 +76,7 @@ export class ApiError extends Error {
   readonly status: number
   readonly body: ApiErrorBody | undefined
   readonly retryAfterSeconds: number | undefined
+  readonly headers: Headers | undefined
   readonly retryable: boolean
 
   // El objeto de detalles es opcional: para un error de estado no hay nada más
@@ -81,6 +89,7 @@ export class ApiError extends Error {
     this.status = status
     this.body = options.body
     this.retryAfterSeconds = options.retryAfterSeconds
+    this.headers = options.headers
     this.retryable = options.retryable ?? isRetryableStatus(status)
   }
 }
@@ -151,20 +160,11 @@ export function apiErrorFromResponse(
     code: codeForStatus(status),
     body,
     retryAfterSeconds: retryAfter,
+    headers,
   })
 }
 
 /** Construye el error de un fallo de red, sin respuesta HTTP. */
-/**
- * ¿El error es de credenciales?
- *
- * Corta la sincronización entera: si el token no vale, las siguientes llamadas
- * fallarán igual y solo gastarían cuota y tiempo.
- */
-export function isUnauthorized(error: unknown): boolean {
-  return error instanceof ApiError && (error.code === 'unauthorized' || error.code === 'forbidden')
-}
-
 export function apiErrorFromNetwork(endpoint: string, cause: unknown): ApiError {
   const isTimeout = cause instanceof Error && cause.name === 'TimeoutError'
 
@@ -175,6 +175,17 @@ export function apiErrorFromNetwork(endpoint: string, cause: unknown): ApiError 
     0,
     { endpoint, code: isTimeout ? 'timeout' : 'network_error', cause, retryable: true },
   )
+}
+
+/**
+ * ¿El error es de credenciales?
+ *
+ * Una respuesta 401 o 403 con el token de la aplicación significa que el UID o
+ * el secreto ya no valen. Reintentar solo gastaría cuota de la API, así que
+ * quien lo reciba debe parar y avisar.
+ */
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof ApiError && (error.code === 'unauthorized' || error.code === 'forbidden')
 }
 
 /**

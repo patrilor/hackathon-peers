@@ -1,10 +1,11 @@
 import Logo from './Logo.jsx'
 
-export default function Login({ onLogin }) {
+export default function Login({ onLogin, aviso }) {
   return (
     <main className="center">
       <Logo />
       <h1>Sanatorio 42</h1>
+      {aviso && <p className="estado aviso">{aviso}</p>}
       <p>¿Te has atascado? Pasa a consulta: aquí siempre hay alguien de guardia. Y si hoy te toca a ti, ponte de guardia y echa una mano.</p>
       <button className="primary" onClick={onLogin}>Entrar con 42</button>
       <section className="howto">

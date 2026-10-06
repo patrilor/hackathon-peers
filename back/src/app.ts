@@ -1,8 +1,13 @@
 /**
  * Montaje del servidor.
  *
- * Se separa de `server.ts` (el punto de entrada) para poder levantar la app
- * entera en los tests de integración sin abrir un puerto.
+ * Se separa del punto de entrada (`server.ts` en local, `src/vercel.ts` más
+ * los ficheros de `api/` en Vercel) para poder levantar la app entera en los
+ * tests de integración sin abrir un
+ * puerto.
+ *
+ * `buildApp` es `async` porque abrir la base de datos y aplicar las migraciones
+ * lo son: `@libsql/client` habla HTTP y no tiene forma síncrona de hacerlo.
  */
 
 import Fastify from 'fastify'
@@ -14,17 +19,17 @@ import { createAuthService } from './auth/auth-service.js'
 import { createOAuthClient } from './auth/oauth-client.js'
 import { loadEnv } from './config/env.js'
 import type { Env } from './config/env.js'
-import { assertSchemaIsCurrent, openDatabase } from './db/database.js'
+import { assertSchemaIsCurrent, closeDatabase, openDatabase } from './db/database.js'
 import type { Db } from './db/database.js'
 import { createServices } from './services/container.js'
 import type { Services } from './services/container.js'
-import { createSynchronizer } from './sync/synchronizer.js'
 import { registerAuthRoutes } from './http/auth-routes.js'
 import { registerDataRoutes } from './http/data-routes.js'
 import { mapError } from './http/errors.js'
 
 export type BuildOptions = {
   env?: Env
+  /** Conexión ya abierta. En los tests, para poder inspeccionarla. */
   db?: Db
   /** `fetch` inyectable, para los tests de integración. */
   fetchImpl?: typeof fetch
@@ -39,7 +44,14 @@ export type BuiltApp = {
   close: () => Promise<void>
 }
 
-/** CORS con credenciales, que es lo que hace que la sesión llegue. */
+/**
+ * CORS con credenciales.
+ *
+ * Solo hace falta en desarrollo: en producción el front y el back se sirven
+ * desde el mismo dominio (`sanatorio-42.vercel.app`), así que no hay nada
+ * cruzado. Se mantiene porque en local el front va en `localhost:5173` y el back
+ * en `localhost:3000`, y sin esto la cookie de sesión no viaja.
+ */
 function registerCors(app: FastifyInstance, env: Env): void {
   app.addHook('onRequest', async (request, reply) => {
     // Sin `Vary` las cachés HTTP pueden guardar la respuesta de un origen y
@@ -48,15 +60,15 @@ function registerCors(app: FastifyInstance, env: Env): void {
 
     const origin = request.headers.origin
 
-    // Peticiones sin `Origin` (curl, health checks, SSR) no necesitan CORS y
-    // no se ven afectadas.
+    // Peticiones sin `Origin` (curl, health checks, SSR) no necesitan CORS y no
+    // se ven afectadas.
     if (origin === undefined) {
       return
     }
 
     if (!env.allowedOrigins.includes(origin)) {
-      // Sin cabeceras de CORS el navegador bloquea, que es justo lo que se
-      // quiere de un origen que no está en la lista.
+      // Sin cabeceras de CORS el navegador bloquea, que es justo lo que se quiere
+      // de un origen que no está en la lista.
       return
     }
 
@@ -64,6 +76,15 @@ function registerCors(app: FastifyInstance, env: Env): void {
     reply.header('Access-Control-Allow-Credentials', 'true')
     reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
     reply.header('Access-Control-Allow-Headers', 'Content-Type')
+    // Sin esto el navegador deja pasar la respuesta pero oculta las cabeceras
+    // propias, y el total de participantes y el aviso de lista parcial llegan al
+    // front como si no existieran. Solo pasa cruzando dominio (en local, Vite en
+    // 5173 y el back en 3000); en producción comparten dominio, pero es justo en
+    // local donde se prueba.
+    reply.header(
+      'Access-Control-Expose-Headers',
+      'X-Total-Participants, X-Peers-Returned, X-Partial',
+    )
     reply.header('Access-Control-Max-Age', '600')
   })
 
@@ -74,8 +95,8 @@ function registerCors(app: FastifyInstance, env: Env): void {
  * Un solo manejador de errores para toda la app.
  *
  * Lo que no se reconoce aquí se registra entero y al front solo le llega un
- * mensaje genérico: un error interno puede traer rutas de ficheros, SQL o
- * parte de un token.
+ * mensaje genérico: un error interno puede traer rutas de ficheros, SQL o parte
+ * de un token.
  */
 function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error, request, reply) => {
@@ -88,7 +109,10 @@ function registerErrorHandler(app: FastifyInstance): void {
     }
 
     if (error instanceof ApiError) {
-      request.log.debug({ endpoint: error.endpoint, code: error.code }, 'error de la API de 42')
+      request.log.debug(
+        { endpoint: error.endpoint, code: error.code, status: error.status },
+        'error de la API de 42',
+      )
     }
 
     reply.code(mapped.status).send(mapped.body)
@@ -96,16 +120,41 @@ function registerErrorHandler(app: FastifyInstance): void {
 }
 
 /** Crea la app completa, sin abrir el puerto. */
-export function buildApp(options: BuildOptions = {}): BuiltApp {
+export async function buildApp(options: BuildOptions = {}): Promise<BuiltApp> {
   const env = options.env ?? loadEnv()
-  const db = options.db ?? openDatabase(env.DATABASE_PATH)
+
+  const db =
+    options.db ??
+    (await openDatabase({
+      url: env.DATABASE_URL,
+      authToken: env.TURSO_AUTH_TOKEN,
+    }))
 
   if (options.db === undefined) {
-    assertSchemaIsCurrent(db)
+    await assertSchemaIsCurrent(db)
   }
 
-  const services = createServices(db)
   const fetchImpl = options.fetchImpl ?? fetch
+  const client = createApiClient(env, fetchImpl)
+
+  /**
+   * Aviso de que la API de 42 ha fallado.
+   *
+   * Va a stderr y no al log de Fastify: la app ya está construida y el logger
+   * vive dentro. Lo que importa es que quede rastro en algún sitio, porque la
+   * web sigue funcionando con datos viejos y sin esto no habría forma de saber
+   * que se están sirviendo viejo.
+   */
+  const avisarUpstreamFallido = (detail: string): void => {
+    process.stderr.write(`[42] ${detail}\n`)
+  }
+
+  const services = createServices(db, client, {
+    peersPageBudget: env.PEERS_PAGE_BUDGET,
+    peersTtlSeconds: env.PEERS_TTL_SECONDS,
+    userProjectsTtlSeconds: env.USER_PROJECTS_TTL_SECONDS,
+    onUpstreamFailure: avisarUpstreamFallido,
+  })
 
   const oauth = createOAuthClient({
     authorizeUrl: `${env.FORTY_TWO_API_BASE}/oauth/authorize`,
@@ -119,18 +168,14 @@ export function buildApp(options: BuildOptions = {}): BuiltApp {
   })
 
   const auth = createAuthService({
-    db,
-    users: services.repositories.users,
     oauth,
     secret: env.SESSION_SECRET,
     frontendUrl: env.FRONTEND_URL,
   })
 
-  const client = createApiClient(env, fetchImpl)
-  const synchronizer = createSynchronizer({ services, client })
-
   const app = Fastify({
     logger: options.logger ?? false,
+    // En Vercel la función va detrás de un proxy que añade `x-forwarded-for`.
     trustProxy: true,
     // Las cookies van firmadas, así que no hay csrf-token de por medio, pero sí
     // un límite de cuerpo: sin él, un POST gigante se come la memoria.
@@ -140,12 +185,33 @@ export function buildApp(options: BuildOptions = {}): BuiltApp {
   registerCors(app, env)
   registerErrorHandler(app)
 
-  /** Comprobación de vida. No toca nada: ni sesión ni base de datos. */
+  /** Comprobación de vida. No toca ni la base ni la API de 42. */
   app.get('/health', () => ({ status: 'ok' }))
+
+  /**
+   * Comprobación de la base de datos.
+   *
+   * Separada de `/health` a propósito: en Vercel un health check que va a Turso
+   * consume tiempo y cuota en cada visita, y para saber si la web vive no hace
+   * falta. Esta es la que hay que mirar cuando alguien dice "no me salen mis
+   * proyectos".
+   */
+  app.get('/health/db', async (_request, reply) => {
+    try {
+      await db.execute('SELECT 1')
+      return { status: 'ok', database: 'ok' }
+    } catch (error) {
+      logDbError(error)
+      return reply.code(503).send({
+        status: 'degraded',
+        database: 'error',
+        error: 'No se pudo conectar con la base de datos',
+      })
+    }
+  })
 
   registerAuthRoutes(app, {
     auth,
-    users: services.users,
     frontendUrl: env.FRONTEND_URL,
   })
 
@@ -153,21 +219,7 @@ export function buildApp(options: BuildOptions = {}): BuiltApp {
     auth,
     projects: services.projects,
     availability: services.availability,
-    // Sincronizar antes de leer mantiene la réplica al día sin que el front
-    // tenga que pedir nada. Los checkpoints hacen que solo se llame a la API
-    // cuando de verdad hace falta.
-    refresh: async (login: string) => {
-      const results = await synchronizer.syncEverythingFor(login)
-      const fallo = results.find((result) => result.outcome === 'failed')
-
-      if (fallo !== undefined) {
-        avisarSyncFallido(fallo.detail)
-      }
-    },
   })
-
-  // Sesiones caducadas: se limpian al arrancar para que la tabla no crezca.
-  auth.purgeExpiredSessions()
 
   return {
     app,
@@ -177,18 +229,14 @@ export function buildApp(options: BuildOptions = {}): BuiltApp {
     close: async () => {
       await app.close()
       if (options.db === undefined) {
-        db.close()
+        closeDatabase(db)
       }
     },
   }
 }
 
-/**
- * Aviso de sincronización fallida.
- *
- * A stderr y no al log de Fastify: la app ya está construida y el logger vive
- * dentro. Lo que importa aquí es que quede rastro en algún sitio.
- */
-function avisarSyncFallido(detail: string | undefined): void {
-  process.stderr.write(`[sync] ${detail ?? 'paso fallido'}\n`)
+/** Log mínimo para el fallo de `/health/db`, que no tiene logger a mano. */
+function logDbError(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error)
+  process.stderr.write(`[db] no se pudo consultar la base: ${message}\n`)
 }

@@ -11,12 +11,6 @@
 
 import { z } from 'zod'
 
-/**
- * Variables de entorno del backend de Sanatorio 42.
- *
- * Usa el prefijo `BACK_` para no colisionar con las variables `VITE_*` del front,
- * que leen un espacio de nombres distinto.
- */
 const envSchema = z.object({
   // --- API de 42 ---------------------------------------------------------
   /** Client ID (UID) de la aplicación OAuth. */
@@ -51,20 +45,25 @@ const envSchema = z.object({
     .default('sanatorio-42-backend/1.0 (+https://github.com/patrilor/hackathon-peers)'),
 
   // --- Servidor -----------------------------------------------------------
-  /** Puerto donde escucha el backend. */
+  /** Puerto donde escucha el backend. Solo se usa en local. */
   PORT: z.coerce.number().int().positive().default(3000),
-  /** Interfaz de escucha. `0.0.0.0` para que responda en Codespaces y contenedores. */
+  /** Interfaz de escucha. `0.0.0.0` para Codespaces y contenedores. */
   HOST: z.string().default('0.0.0.0'),
 
   // --- Frontend -----------------------------------------------------------
   /**
-   * Origen(es) del frontend a los que se permite hacer CORS con credenciales.
+   * Origen(es) del frontend a los que se permite CORS con credenciales.
    *
-   * OJO: `Access-Control-Allow-Credentials` es incompatible con el comodín `*`.
-   * Si se deja vacío o mal puesto, el login parecerá funcionar pero `/auth/me`
-   * devolverá 401 siempre, porque el navegador no manda la cookie de sesión.
+   * En producción el front y el back se sirven desde el **mismo dominio**
+   * (`sanatorio-42.vercel.app`), así que no hay CORS que hablar y esta variable
+   * no hace falta. Solo es obligatoria para desarrollo, donde Vite sirve el
+   * front en `localhost:5173` y el back en `localhost:3000`.
+   *
+   * Si se deja vacía, se usa `FRONTEND_URL` como único origen permitido.
    */
-  FRONTEND_ORIGINS: z.string().min(1, 'FRONTEND_ORIGINS es obligatoria'),
+  FRONTEND_ORIGINS: z.string().default(''),
+  /** A dónde vuelve el usuario tras el login. Normalmente el front. */
+  FRONTEND_URL: z.url('FRONTEND_URL debe ser una URL válida'),
 
   // --- OAuth --------------------------------------------------------------
   /**
@@ -75,57 +74,109 @@ const envSchema = z.object({
    * autenticado, así que un nombre mal escrito no falla aquí, falla después en el
    * login. Por eso va en el entorno y no hardcodeado.
    *
-   * `public` es el default de la API. `profile` es el scope de datos de usuario
-   * que aparece en el panel de la app 78735 ("manage user data"); sin él
-   * `/v2/me` responde `404 {}`.
+   * `public` es el default de la API y basta para leer proyectos y
+   * participantes. `profile` es el scope de datos de usuario que aparece en el
+   * panel de la app ("manage user data"); sin él, `/v2/me` responde `404 {}` y
+   * el login no puede saber de quién es la sesión.
    */
   FORTY_TWO_SCOPES: z.string().default('public profile'),
   /**
    * Callback de OAuth. Debe estar registrada **carácter a carácter** en el panel
    * de la app de 42, o 42 no devolverá nunca el código.
+   *
+   * En producción: `https://sanatorio-42.vercel.app/api/auth/callback`.
    */
   FORTY_TWO_REDIRECT_URI: z.url('FORTY_TWO_REDIRECT_URI debe ser una URL válida'),
   /**
-   * Clave para firmar las cookies de sesión. Sin ella, cualquier persona podría
-   * fabricar su propia cookie y hacerse pasar por otra.
+   * Clave para firmar las cookies. Sin ella, cualquier persona podría fabricar su
+   * propia cookie y hacerse pasar por otra.
+   *
+   * Como la sesión va dentro de la cookie firmada (no hay tabla de sesiones),
+   * esta clave es lo único que impide suplantar a alguien.
    */
   SESSION_SECRET: z.string().min(16, 'SESSION_SECRET debe tener al menos 16 caracteres'),
-  /** A dónde vuelve el usuario tras el login. Normalmente el front. */
-  FRONTEND_URL: z.url('FRONTEND_URL debe ser una URL válida'),
 
   // --- Base de datos ------------------------------------------------------
-  /** Ruta del fichero SQLite. `:memory:` para tests. */
-  DATABASE_PATH: z.string().default('data/sanatorio.db'),
-
-  // --- Campus -------------------------------------------------------------
-  /** Id del cursus. Common Core = 21. */
-  CURSUS_ID: z.coerce.number().int().positive().default(21),
-
-  // --- Sincronización -----------------------------------------------------
   /**
-   * Segundos entre peticiones a la API de 42.
+   * Conexión a la base de datos.
    *
-   * El límite oficial es de 2 peticiones por segundo. 0.55 s de margen da
-   * ~1.8 req/s, suficiente para no comerse un 429.
+   * Acepta los dos formatos de libsql/Turso:
+   *
+   * - `libsql://tu-db.turso.io` + `TURSO_AUTH_TOKEN`, en producción (Vercel).
+   * - `file:data/sanatorio.db`, en local y en los tests. Sin token.
+   *
+   * Se usa `@libsql/client` y no `better-sqlite3` porque es HTTP puro: no
+   * necesita binario nativo, que es lo que hace que `better-sqlite3` no sea una
+   * opción fiable en Vercel. El coste es que las consultas son `async`.
    */
-  API_REQUEST_DELAY_SECONDS: z.coerce.number().positive().default(0.55),
-  /** Timeout de las peticiones normales. */
-  API_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
-  /** Peticiones por página a la API. El máximo de 42 es 100. */
+  DATABASE_URL: z.string().min(1, 'DATABASE_URL no puede estar vacía').default('file:data/sanatorio.db'),
+  /**
+   * Token de Turso. Solo hace falta con `libsql://`; se ignora con `file:`.
+   *
+   * Es una credencial real: nunca al log, nunca en git.
+   */
+  TURSO_AUTH_TOKEN: z.string().default(''),
+
+  // --- Caché de lectura contra la API de 42 --------------------------------
+  /**
+   * Peticiones por página a la API. El máximo de 42 es 100.
+   *
+   * Con 100, el proyecto 2689 ("Call Me Maybe", 2 047 participantes) son 21
+   * páginas. Subirlo no ayuda: 100 es el tope del servidor.
+   */
   PAGE_SIZE: z.coerce.number().int().positive().max(100).default(100),
+
   /**
-   * Límite de peticiones por minuto de **nuestro propio** sincronizador.
+   * Páginas nuevas de peers que se descargan como mucho en una petición.
    *
-   * Con 550 ms entre llamadas se llega a unas 109/min, así que 100 es el tope
-   * que manda. Este límite solo evita ráfagas: para la cuota hay que mirar
-   * `SYNC_REQUESTS_PER_HOUR`, porque 100/min son 6000/h.
+   * El límite duro de la API de 42 son 2 peticiones por segundo. Con 21 páginas
+   * por proyecto grande, descargarlas enteras son ~11 s: más que el límite de
+   * duración de una función en el plan gratuito de Vercel.
+   *
+   * Por eso la caché va página a página y cada petición solo gasta un
+   * presupuesto. Con 5, un proyecto grande se completa en 4-5 visitas y una
+   * función se mantiene por debajo de los 3 s.
+   *
+   * Si el plan de Vercel permite funciones más largas, sube este número a 21 y
+   * la primera respuesta ya sale completa. No hay que tocar nada más.
    */
-  SYNC_REQUESTS_PER_MINUTE: z.coerce.number().int().positive().max(600).default(100),
+  PEERS_PAGE_BUDGET: z.coerce.number().int().positive().max(100).default(5),
+
   /**
-   * Límite de peticiones por hora. Es el tope real de la API de 42: pasarse
-   * devuelve `429 Spam Rate Limit Exceeded` y, si se insiste, cierran la app.
+   * Cuánto se considera fresco un proyecto.
+   *
+   * Las páginas de peers caducan todas a la vez: si han caducado, la siguiente
+   * petición empieza a reescribirlas por el presupuesto.
    */
-  SYNC_REQUESTS_PER_HOUR: z.coerce.number().int().positive().max(1200).default(1200),
+  PEERS_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+
+  /**
+   * Cuánto se considera frescos los proyectos de una persona.
+   *
+   * `GET /v2/users/:login/projects_users` son una o dos peticiones, así que no
+   * hay problema de coste; el TTL existe para que al recargar la web no se
+   * vuelva a preguntar a 42 lo mismo que ya sabemos.
+   */
+  USER_PROJECTS_TTL_SECONDS: z.coerce.number().int().positive().default(1800),
+
+  /**
+   * Separación mínima entre peticiones a la API de 42, en milisegundos.
+   *
+   * La API manda `x-secondly-ratelimit-remaining` en cada respuesta, y el
+   * throttling se guía por eso (ver `api/throttle.ts`): cuando queda poca
+   * cuota por segundo espera más, y cuando sobra no espera. Este valor es solo
+   * el suelo, para no machacar dos peticiones seguidas en el mismo tick.
+   *
+   * `0` quita el suelo y deja solo las cabeceras de la API, que es lo que
+   * necesitan los tests y lo que puede servir en local.
+   */
+  MIN_REQUEST_INTERVAL_MS: z.coerce.number().int().min(0).default(250),
+
+  /** Timeout de las peticiones a la API de 42. */
+  API_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+
+  /** Intentos antes de rendirse, sin contar el primero. */
+  API_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
 })
 
 /** Configuración normalizada: el entorno validado más lo derivado de él. */
@@ -134,10 +185,10 @@ export type Env = z.infer<typeof envSchema> & {
   readonly allowedOrigins: readonly string[]
   /** Raíz de la API v2 de 42, con barra final. */
   readonly apiV2Base: string
-  /** Origen del callback de OAuth, para poder verificar que no es de Vercel. */
-  readonly oauthRedirectOrigin: string
   /** Scopes de OAuth ya troceados, sin entradas vacías. */
   readonly oauthScopes: readonly string[]
+  /** `true` si la base es un fichero local y no un servidor Turso. */
+  readonly isLocalFile: boolean
 }
 
 /**
@@ -175,27 +226,41 @@ function parseScopes(raw: string): string[] {
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const parsed = envSchema.parse(source)
 
+  // Sin `FRONTEND_ORIGINS` explícitos se permite solo el front de `FRONTEND_URL`,
+  // que es exactamente lo que hace falta en producción al servir ambos desde el
+  // mismo dominio.
   const origins = parseOrigins(parsed.FRONTEND_ORIGINS)
-  if (origins.length === 0) {
-    throw new Error('FRONTEND_ORIGINS no contiene ningún origen válido.')
-  }
+  const allowedOrigins =
+    origins.length > 0 ? origins : [new URL(parsed.FRONTEND_URL).origin.replace(/\/$/, '')]
 
   const apiBase = parsed.FORTY_TWO_API_BASE.replace(/\/$/, '')
+  const isLocalFile = parsed.DATABASE_URL.startsWith('file:')
+
+  if (!isLocalFile && parsed.TURSO_AUTH_TOKEN === '') {
+    throw new Error(
+      'DATABASE_URL apunta a un servidor Turso (`libsql://`) pero TURSO_AUTH_TOKEN está vacía. ' +
+        'El token se descarga en el panel de Turso, en la pestaña "Keys".',
+    )
+  }
 
   return Object.freeze({
     ...parsed,
-    allowedOrigins: Object.freeze(origins),
+    allowedOrigins: Object.freeze(allowedOrigins),
     apiV2Base: `${apiBase}/v2`,
-    oauthRedirectOrigin: new URL(parsed.FORTY_TWO_REDIRECT_URI).origin,
     oauthScopes: Object.freeze(parseScopes(parsed.FORTY_TWO_SCOPES)),
+    isLocalFile,
   })
 }
 
-/** Variables que existen y documenta `.env.example`. No se deben cambiar. */
+/**
+ * Variables que sin falta no puede arrancar el backend.
+ *
+ * `FRONTEND_ORIGINS` ya no está: en producción el front y el back comparten
+ * dominio, y en local se deduce de `FRONTEND_URL`.
+ */
 export const REQUIRED_ENV_VARS = [
   'FORTY_TWO_UID',
   'FORTY_TWO_SECRET',
-  'FRONTEND_ORIGINS',
   'FORTY_TWO_REDIRECT_URI',
   'SESSION_SECRET',
   'FRONTEND_URL',

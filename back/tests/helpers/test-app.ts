@@ -8,10 +8,10 @@
 import { buildApp } from '../../src/app.js'
 import type { BuiltApp } from '../../src/app.js'
 import { loadEnv } from '../../src/config/env.js'
-import { openDatabase } from '../../src/db/database.js'
+import { closeDatabase, openDatabase } from '../../src/db/database.js'
 import type { Env } from '../../src/config/env.js'
 
-/** Entorno válido, con lo único que no se puede inventar siendo parametrado. */
+/** Entorno válido, con lo único que no se puede inventar siendo parametrizado. */
 export function makeEnv(overrides: Partial<NodeJS.ProcessEnv> = {}): Env {
   return loadEnv({
     FORTY_TWO_UID: 'u-test',
@@ -19,11 +19,13 @@ export function makeEnv(overrides: Partial<NodeJS.ProcessEnv> = {}): Env {
     SESSION_SECRET: 'secreto-de-sesion-para-pruebas',
     FRONTEND_ORIGINS: 'https://front.test',
     FRONTEND_URL: 'https://front.test',
-    FORTY_TWO_REDIRECT_URI: 'https://back.test/auth/callback',
-    // El limitador de la API es de 550 ms entre llamadas. En los tests eso solo
+    FORTY_TWO_REDIRECT_URI: 'https://back.test/api/auth/callback',
+    // El ritmo de la API son 2 peticiones por segundo. En los tests eso solo
     // añadiría segundos de espera, así que se deja casi a cero: los tests del
-    // limitador ya cubren el retraso con reloj falso.
-    API_REQUEST_DELAY_SECONDS: '0.001',
+    // `Throttle` ya cubren el retraso con reloj falso.
+    MIN_REQUEST_INTERVAL_MS: '0',
+    PEERS_TTL_SECONDS: '900',
+    USER_PROJECTS_TTL_SECONDS: '1800',
     ...overrides,
   })
 }
@@ -75,14 +77,74 @@ export function json(response: InjectResponse): unknown {
   return JSON.parse(response.body) as unknown
 }
 
+/**
+ * Avatar de ejemplo con la forma que devuelve la 42 de verdad: `image` es un
+ * objeto con `link` y cuatro tamaños, no una URL suelta.
+ */
+const AVATAR = {
+  link: 'https://img/1.png',
+  versions: {
+    large: 'https://img/1-large.png',
+    medium: 'https://img/1-medium.png',
+    small: 'https://img/1-small.png',
+    micro: 'https://img/1-micro.png',
+  },
+}
+
 /** Rutas que la app conoce, para el proveedor simulado. */
 const DEFAULT_ROUTES: Record<string, RouteHandler> = {
   '/v2/projects': [{ id: 10, name: 'ft_printf' }],
   '/v2/campus/22/locations': [],
-  '/v2/users/albrodri/projects_users': [{ status: 'in_progress', project: { id: 10 } }],
-  '/v2/projects/10/users': [{ id: 2, login: 'jdoe' }],
-  '/v2/users/albrodri': { id: 1, login: 'albrodri', image: { url: 'https://img/1.png' } },
+  '/v2/users/albrodri/projects_users': [
+    { status: 'in_progress', project: { id: 10, name: 'ft_printf' } },
+    { status: 'finished', project: { id: 11, name: 'libft' } },
+  ],
+  // Los participantes llegan por `projects_users` filtrado, no por
+  // `/projects/:id/users`: así cada uno trae su estado en ese proyecto.
+  //
+  // La 42 devuelve a **todo** el que tiene una fila en ese proyecto, incluida
+  // la persona que pregunta, así que aquí también está `albrodri`.
+  //
+  // `jdoe` está `finished` y sin puesto a propósito: es el que el filtro de
+  // accionables tiene que dejar fuera, y así se comprueba sin tener que mirar
+  // el cuerpo de la respuesta.
+  '/v2/projects_users': [
+    {
+      status: 'in_progress',
+      project: { id: 10, name: 'ft_printf' },
+      user: {
+        id: 1,
+        login: 'albrodri',
+        image: AVATAR,
+        location: { id: 5, name: 'c2r17s2' },
+      },
+    },
+    {
+      status: 'finished',
+      project: { id: 10, name: 'ft_printf' },
+      user: { id: 2, login: 'jdoe', image: AVATAR, location: null },
+    },
+    {
+      status: 'in_progress',
+      project: { id: 10, name: 'ft_printf' },
+      user: {
+        id: 3,
+        login: 'mgomez',
+        image: AVATAR,
+        location: { id: 7, name: 'c3r7p7' },
+      },
+    },
+  ],
+  '/v2/users/albrodri': { id: 1, login: 'albrodri', image: AVATAR },
 }
+
+/**
+ * Proyectos que "existen" en el proveedor simulado.
+ *
+ * Los ids que están en `DEFAULT_ROUTES` (10). Cualquier otro da 404, como en la
+ * API real.
+ */
+const KNOWN_PROJECTS = new Set([10])
 
 export function makeProvider(options: ProviderOptions = {}) {
   const requests: Recorded[] = []
@@ -129,7 +191,7 @@ export function makeProvider(options: ProviderOptions = {}) {
           options.profile ?? {
             id: 1,
             login: 'albrodri',
-            image: { url: 'https://img/1.png' },
+            image: AVATAR,
           },
         ),
         { status: 200 },
@@ -142,9 +204,35 @@ export function makeProvider(options: ProviderOptions = {}) {
       return new Response(JSON.stringify({ error: 'not_found' }), { status: 404 })
     }
 
-    const answer = typeof configured === 'function' ? configured() : configured
+    // La API real responde `404` si el filtro apunta a un proyecto que no
+    // existe, en vez de devolver una lista vacía. Sin esto, un id equivocado
+    // parecería un proyecto sin gente, que es un fallo mucho más difícil de
+    // detectar.
+    const filter = url.searchParams.get('filter[project_id]')
 
-    return new Response(JSON.stringify(answer), { status: 200 })
+    if (filter !== null && !KNOWN_PROJECTS.has(Number(filter))) {
+      return new Response(JSON.stringify({ error: 'not_found' }), { status: 404 })
+    }
+
+    const answer = typeof configured === 'function' ? configured() : configured
+    const items = Array.isArray(answer) ? answer : [answer]
+
+    // Cabeceras de paginación y de cuota, como las manda la API de verdad. Sin
+    // `X-Total`, el cliente asumiría que una página con 3 elementos es el
+    // proyecto entero, y los tests no probarían la paginación.
+    return new Response(JSON.stringify(answer), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'x-total': String(items.length),
+        'x-page': url.searchParams.get('page') ?? '1',
+        'x-per-page': '100',
+        'x-secondly-ratelimit-limit': '2',
+        'x-secondly-ratelimit-remaining': '2',
+        'x-hourly-ratelimit-limit': '1200',
+        'x-hourly-ratelimit-remaining': '1197',
+      },
+    })
   }
 
   return { fetchImpl, requests, routes }
@@ -165,11 +253,14 @@ export type TestApp = BuiltApp & {
  *
  * `inject` hace las peticiones por dentro del proceso, sin abrir un puerto:
  * los tests van mil veces más rápido y no hay puertos que colisionen.
+ *
+ * Es `async` porque abrir la base con `@libsql/client` y aplicar las
+ * migraciones lo son; la promesa devuelve la app ya montada y migrada.
  */
-export function makeApp(
+export async function makeApp(
   envOverrides: Partial<NodeJS.ProcessEnv> = {},
   providerOptions: ProviderOptions = {},
-): TestApp {
+): Promise<TestApp> {
   const env = makeEnv(envOverrides)
   const provider = makeProvider(providerOptions)
 
@@ -177,8 +268,8 @@ export function makeApp(
   // `data/sanatorio.db` y todos los tests compartirían el mismo estado: el
   // `available: true` de un test se colaría en otro y los fallos dependerían
   // del orden de ejecución.
-  const db = openDatabase(':memory:')
-  const built = buildApp({ env, db, fetchImpl: provider.fetchImpl })
+  const db = await openDatabase({ url: 'file::memory:' })
+  const built = await buildApp({ env, db, fetchImpl: provider.fetchImpl })
 
   async function login(): Promise<string> {
     const start = await built.app.inject({ method: 'GET', url: '/auth/login' })
@@ -205,7 +296,7 @@ export function makeApp(
     login,
     close: async () => {
       await built.app.close()
-      db.close()
+      closeDatabase(db)
     },
   }
 }

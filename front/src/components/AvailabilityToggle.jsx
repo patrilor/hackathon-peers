@@ -9,6 +9,7 @@ export default function AvailabilityToggle() {
   // estaba roto (`!next` sobre una Promise da false).
   const [available, setAvailable] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [aviso, setAviso] = useState(null)
 
   useEffect(() => {
     let vigente = true
@@ -37,16 +38,23 @@ export default function AvailabilityToggle() {
     const next = !available
     setAvailable(next)
     setSaving(true)
+    setAviso(null)
+
     try {
       await api.setAvailability(next)
     } catch {
-      setAvailable(!next) // revertir si falla
+      // Se revierte y se avisa: dejar el interruptor en un estado que la base no
+      // tiene haría que al recargar vuelva a estar apagado sin motivo.
+      setAvailable(!next)
+      setAviso('No se ha podido guardar. Prueba otra vez.')
+      setTimeout(() => setAviso(null), 4000)
     } finally {
       setSaving(false)
     }
   }
 
   return (
+    <span className="switch-wrap">
     <label className="switch-row">
       <span>De guardia</span>
       <input type="checkbox" className="switch" checked={available} onChange={toggle} disabled={saving} />
@@ -60,5 +68,11 @@ export default function AvailabilityToggle() {
         ⓘ
       </span>
     </label>
+    {aviso && (
+      <span className="estado error switch-aviso" role="status">
+        {aviso}
+      </span>
+    )}
+    </span>
   )
 }

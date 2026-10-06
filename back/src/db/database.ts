@@ -1,46 +1,51 @@
 /**
- * Apertura y configuración de la base de datos SQLite.
+ * Apertura y configuración de la base de datos.
  *
- * better-sqlite3 es síncrono a propósito: en un backend de este tamaño evita
- * el ruido de `await` en todas las consultas y hace que las transacciones
- * sean triviales de escribir bien.
+ * Se usa `@libsql/client` y no `better-sqlite3` por un motivo concreto: vamos a
+ * desplegar en Vercel, y Vercel ejecuta cada petición en un runtime que no
+ * permite confiar en binarios nativos. `@libsql/client` habla HTTP, así que no
+ * hay nada que compilar ni que cargar, y además sirve para Turso (producción) y
+ * para un fichero SQLite local (desarrollo y tests) con el mismo código.
+ *
+ * El precio es que las consultas son `async`. Es asumible: en este back hay dos
+ * tablas y la latencia de red dwarfs cualquier ahorro de `await`.
  */
 
-import Database from 'better-sqlite3'
 import { mkdirSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+
+import { createClient } from '@libsql/client'
+import type { Client } from '@libsql/client'
 
 import { LATEST_VERSION, MIGRATIONS } from './migrations.js'
 
-export type Db = Database.Database
+export type Db = Client
+
+export type DatabaseOptions = {
+  /** `libsql://…` para Turso, `file:…` para un SQLite local. */
+  url: string
+  /** Token de Turso. Se ignora con `file:`. */
+  authToken?: string | undefined
+}
 
 /**
- * Abre la base de datos, aplica los PRAGMAs y ejecuta las migraciones pendientes.
+ * Abre la conexión y ejecuta las migraciones pendientes.
  *
- * @param path Ruta del fichero, o `:memory:` para una base temporal en memoria.
- *             Las rutas relativas se resuelven contra el directorio de trabajo.
+ * Con `file:` se crean los directorios que falten: `data/` no existe en un repo
+ * recién clonado y SQLite no crea directorios por su cuenta.
  */
-export function openDatabase(path: string): Db {
-  const isMemory = path === ':memory:'
-  const resolved = isMemory ? path : resolve(process.cwd(), path)
-
-  // `data/` no existe en un repo recién clonado, y SQLite no crea directorios.
-  if (!isMemory) {
-    mkdirSync(dirname(resolved), { recursive: true })
+export async function openDatabase(options: DatabaseOptions): Promise<Db> {
+  if (options.url.startsWith('file:')) {
+    ensureParentDirectory(options.url)
   }
 
-  const db = new Database(resolved)
+  const db = createClient({
+    url: options.url,
+    ...(options.authToken === undefined || options.authToken === ''
+      ? {}
+      : { authToken: options.authToken }),
+  })
 
-  // WAL: permite lecturas mientras se escribe. Sin esto, una sincronización
-  // larga bloquearía las peticiones de los usuarios viendo la lista de peers.
-  db.pragma('journal_mode = WAL')
-  // Las claves foráneas están apagadas por defecto en SQLite. Sin activarlas,
-  // los ON DELETE CASCADE del esquema no se aplican.
-  db.pragma('foreign_keys = ON')
-  // Espera hasta 5 s a que se libere un candado en vez de fallar al instante.
-  db.pragma('busy_timeout = 5000')
-
-  migrate(db)
+  await migrate(db)
 
   return db
 }
@@ -49,23 +54,21 @@ export function openDatabase(path: string): Db {
  * Ejecuta las migraciones que falten, una a una y dentro de su transacción.
  *
  * Cada migración se aplica junto a la actualización de `user_version`, de modo
- * que un fallo a mitad no deja la base en un estado intermedio.
+ * que un fallo a mitad no deja la base en un estado intermedio. `batch` es
+ * atómico: o entra la migración entera, o no entra nada.
  */
-export function migrate(db: Db): number[] {
-  const current = db.pragma('user_version', { simple: true }) as number
+export async function migrate(db: Db): Promise<number[]> {
+  const current = await schemaVersion(db)
   const pending = MIGRATIONS.filter((migration) => migration.version > current)
 
   const applied: number[] = []
   for (const migration of pending) {
-    const run = db.transaction(() => {
-      for (const statement of migration.statements) {
-        db.exec(statement)
-      }
-      // `PRAGMA` no admite parámetros vinculados: hay que interpolar. El valor
-      // es un entero de este mismo array, así que no hay inyección posible.
-      db.exec(`PRAGMA user_version = ${migration.version}`)
-    })
-    run()
+    // `PRAGMA` no admite parámetros vinculados: hay que interpolar. El valor es
+    // un entero de este mismo array, así que no hay inyección posible.
+    await db.batch([
+      ...migration.statements,
+      `PRAGMA user_version = ${migration.version}`,
+    ])
     applied.push(migration.version)
   }
 
@@ -73,8 +76,11 @@ export function migrate(db: Db): number[] {
 }
 
 /** Versión del esquema actualmente aplicada. */
-export function schemaVersion(db: Db): number {
-  return db.pragma('user_version', { simple: true }) as number
+export async function schemaVersion(db: Db): Promise<number> {
+  const result = await db.execute('PRAGMA user_version')
+  const row = result.rows[0]
+
+  return row === undefined ? 0 : Number(row.user_version ?? 0)
 }
 
 /**
@@ -84,8 +90,8 @@ export function schemaVersion(db: Db): number {
  * correspondientes, es mejor fallar con un mensaje claro que con un error raro
  * más tarde.
  */
-export function assertSchemaIsCurrent(db: Db): void {
-  const current = schemaVersion(db)
+export async function assertSchemaIsCurrent(db: Db): Promise<void> {
+  const current = await schemaVersion(db)
   if (current !== LATEST_VERSION) {
     throw new Error(
       `El esquema de la base de datos está en la versión ${current} y el código ` +
@@ -94,18 +100,48 @@ export function assertSchemaIsCurrent(db: Db): void {
   }
 }
 
-/** Cierra la base de datos. Ejecuta un checkpoint de WAL para no dejar restos. */
+/**
+ * Las claves foráneas están apagadas por defecto en SQLite.
+ *
+ * Con `better-sqlite3` era un `PRAGMA` en la apertura. `@libsql/client` expone
+ * `foreignKeys` como opción del cliente y lo aplica en la conexión, así que se
+ * deja aquí solo como comprobación de que no se nos olvide.
+ */
+export async function foreignKeysEnabled(db: Db): Promise<boolean> {
+  const result = await db.execute('PRAGMA foreign_keys')
+  const row = result.rows[0]
+
+  return row !== undefined && Number(row.foreign_keys ?? 0) === 1
+}
+
+/** Cierra la conexión. Idempotente. */
 export function closeDatabase(db: Db): void {
-  try {
-    db.pragma('wal_checkpoint(TRUNCATE)')
-  } catch {
-    // Si el checkpoint falla (base ya cerrada), no es motivo para fallar.
-  } finally {
-    db.close()
-  }
+  db.close()
 }
 
 /** Marca de tiempo ISO-8601, formato único para todas las columnas `*_at`. */
 export function nowIso(): string {
   return new Date().toISOString()
+}
+
+/** Timestamp ISO dentro de `seconds`, para las columnas `expires_at` del caché. */
+export function isoIn(seconds: number): string {
+  return new Date(Date.now() + seconds * 1000).toISOString()
+}
+
+/** `true` si la fecha ISO está en el pasado. */
+export function isExpired(iso: string): boolean {
+  return Date.parse(iso) <= Date.now()
+}
+
+/** Crea el directorio que contiene el fichero de la base, si falta. */
+function ensureParentDirectory(url: string): void {
+  const path = url.slice('file:'.length).split('?')[0] ?? ''
+  const separator = path.lastIndexOf('/')
+
+  if (separator <= 0) {
+    return
+  }
+
+  mkdirSync(path.slice(0, separator), { recursive: true })
 }

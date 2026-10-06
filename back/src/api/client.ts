@@ -1,7 +1,7 @@
 /**
  * Cliente de la API de 42.
  *
- * Una sola puerta de entrada a la API: aquí viven el token, el rate limit, los
+ * Una sola puerta de entrada a la API: aquí viven el token, el ritmo, los
  * reintentos, los timeouts y la paginación. El resto del backend solo ve
  * funciones tipadas, y ninguna hace `fetch` directamente.
  *
@@ -9,19 +9,26 @@
  *
  * | Endpoint                                | Particularidad                        |
  * |-----------------------------------------|---------------------------------------|
- * | `/v2/me`                                | Necesita token de **usuario** y scope de identidad (`profile`). Con token de app devuelve 404. |
- * | `/v2/users/:login/projects_users`       | Trae el estado por proyecto. No trae el nombre del proyecto. |
- * | `/v2/projects/:id/users`                | Participantes de todo el histórico. No trae estado. |
- * | `/v2/users/:login`                      | Trae `location`: el puesto actual, o `null`. |
- * | `/v2/campus/:id/locations`              | DESCARTADO: histórico completo, inviable. Ver `getUser`. |
- * | `/v2/campus/:id/projects/:pid/users`    | No existe (404). Por eso no se usa.   |
- * | `?filter[login]=a,b,c`                  | Funciona, pero no resuelve el estado. |
+ * | `/v2/projects_users?filter[project_id]` | Participantes **de una página**. Estado **y** persona en la misma llamada. |
+ * | `/v2/users/:login/projects_users`       | Los proyectos de una persona.         |
+ * | `/v2/me`                                | Necesita token de **usuario** y scope de identidad (`profile`). Va en `auth/oauth-client.ts`, no aquí. |
+ * | `/v2/projects`                          | **No se usa.** El catálogo son 1 702 proyectos (18 páginas) y no lo necesita nadie. |
+ * | `/v2/projects/:id/users`                | Participantes sin estado. **No se usa.** |
+ * | `/v2/campus/:id/locations`              | DESCARTADO: histórico completo, inviable. |
+ * | `?filter[project_id]=a,b`               | Solo devuelve los del primer id (comprobado: 100 entradas, todas de `2689`). Un proyecto por petición. |
+ *
+ * Lo más importante de este cliente es que `getProjectParticipantsPage` devuelve
+ * **una página**, no el proyecto entero. La razón está medida: el proyecto
+ * `2689` tiene 2 047 participantes, son 21 páginas, y la API va a 2 peticiones
+ * por segundo. Bajar el proyecto entero son ~11 s, que no caben en una función
+ * de Vercel. Bajando de a una, cada petición dura menos de un segundo y la
+ * caché las va guardando (ver `db/repositories/cache.ts`).
  */
 
-import type { RateLimiter } from './rate-limiter.js'
-import { TokenManager } from './token-manager.js'
+import type { AppTokenProvider } from './app-token.js'
+import type { Throttle } from './throttle.js'
 import { ApiError, apiErrorFromNetwork, apiErrorFromResponse, endpointFromUrl } from './errors.js'
-import type { ApiProjectUser, ApiUser } from '../domain/types.js'
+import type { ApiProjectUser } from '../domain/types.js'
 
 /** Configuración del cliente. */
 export type FortyTwoClientOptions = {
@@ -33,10 +40,10 @@ export type FortyTwoClientOptions = {
   timeoutMs: number
   /** Peticiones por página. Máximo de la API: 100. */
   pageSize: number
-  /** Limitador compartido por todas las peticiones del proceso. */
-  limiter: RateLimiter
-  /** Gestor del token de la aplicación. */
-  tokens: TokenManager
+  /** Ritmo de las peticiones, guiado por las cabeceras de cuota de la API. */
+  throttle: Throttle
+  /** Token de la aplicación. */
+  tokens: AppTokenProvider
   /** `fetch` inyectable, para los tests. */
   fetchImpl?: typeof fetch
   /** Intentos antes de rendirse, sin contar el primero. */
@@ -47,121 +54,93 @@ export type FortyTwoClientOptions = {
   backoffMaxMs?: number
   /** `sleep` inyectable, para no esperar de verdad en los tests. */
   sleep?: (ms: number) => Promise<void>
-  /** Inyectable en los tests: si devuelve token, se usa ese. */
-  tokenProvider?: () => Promise<string>
 }
 
-/** Peticiones a `/v2/...`. */
-type V2Options = {
-  /** Timeout propio, para los endpoints lentos. */
-  timeoutMs?: number
-}
-
-const DEFAULT_MAX_RETRIES = 3
+const DEFAULT_MAX_RETRIES = 2
 const DEFAULT_BACKOFF_BASE_MS = 500
-const DEFAULT_BACKOFF_MAX_MS = 30_000
+const DEFAULT_BACKOFF_MAX_MS = 10_000
+
+/** Tope de elementos acumulados al paginar. Cinturón de seguridad. */
+const MAX_ITEMS = 20_000
+
+/** Una página de resultados, con los metadatos que manda la API en las cabeceras. */
+export type Page<T> = {
+  items: T[]
+  /** Registros por página que dice la API. */
+  perPage: number
+  /**
+   * Número **total de registros**, no de páginas.
+   *
+   * La documentación oficial dice lo contrario ("count of pages") pero su propio
+   * ejemplo la desmiente: con `X-Total: 17570`, `X-Per-Page: 30` y
+   * `rel="last"` apuntando a la página 586. Y 17 570 / 30 redondeado hacia
+   * arriba da exactamente 586. Comprobado también con datos reales:
+   * `?filter[project_id]=2689&per_page=100` devuelve `X-Total: 2047` y
+   * `rel="last"` en la página 21.
+   */
+  total: number
+}
 
 export class FortyTwoClient {
   private readonly apiV2Base: string
   private readonly userAgent: string
   private readonly timeoutMs: number
   private readonly pageSize: number
-  private readonly limiter: RateLimiter
-  private readonly tokens: TokenManager
+  private readonly throttle: Throttle
+  private readonly tokens: AppTokenProvider
   private readonly fetchImpl: typeof fetch
   private readonly maxRetries: number
   private readonly backoffBaseMs: number
   private readonly backoffMaxMs: number
   private readonly sleep: (ms: number) => Promise<void>
-  private readonly tokenProvider: (() => Promise<string>) | null
 
   constructor(options: FortyTwoClientOptions) {
     this.apiV2Base = options.apiV2Base
     this.userAgent = options.userAgent
     this.timeoutMs = options.timeoutMs
     this.pageSize = options.pageSize
-    this.limiter = options.limiter
+    this.throttle = options.throttle
     this.tokens = options.tokens
     this.fetchImpl = options.fetchImpl ?? fetch
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
     this.backoffBaseMs = options.backoffBaseMs ?? DEFAULT_BACKOFF_BASE_MS
     this.backoffMaxMs = options.backoffMaxMs ?? DEFAULT_BACKOFF_MAX_MS
     this.sleep = options.sleep ?? defaultSleep
-    this.tokenProvider = options.tokenProvider ?? null
   }
 
   // --- Endpoints ----------------------------------------------------------
 
   /**
-   * `GET /v2/me`: el usuario del token.
+   * `GET /v2/projects_users?filter[project_id]=:id`, **una página**.
    *
-   * Exige token de **usuario** y scope de identidad (`profile`). Con el token de la aplicación
-   * la API responde `404 {}`, no un 403, lo que desconcierta. Se deja el
-   * parámetro para poder pasar un token de usuario cuando el flow OAuth esté.
+   * Es la llamada que alimenta la lista de compañeros, y trae en el mismo objeto
+   * y en las mismas peticiones:
    *
-   * @param accessToken Token de usuario. Si se omite, usa el de la app.
+   * - `status` — `in_progress` o `finished`. Sin esto no hay manera de
+   *   distinguir a un especialista de alguien que lo está haciendo.
+   * - `user.location` — el puesto actual en el cluster, o `null`.
+   * - `user.image` — el avatar.
+   * - `project.name` — el nombre del proyecto.
+   *
+   * Que el `user` anidado traiga `location` está comprobado: en una página de
+   * 100 participantes del proyecto 2689, 11 lo traían con puesto y ninguno lo
+   * omitió. Es lo que permite sacar la lista de compañeros con 21 peticiones en
+   * vez de 21 más una por persona.
    */
-  async getMe(accessToken?: string): Promise<ApiUser> {
-    return this.requestV2<ApiUser>('/me', { accessToken })
+  async getProjectParticipantsPage(projectId: number, page = 1): Promise<Page<ApiProjectUser>> {
+    return this.requestPage<ApiProjectUser>(
+      `/projects_users?filter[project_id]=${projectId}&page=${page}&per_page=${this.pageSize}`,
+    )
   }
 
   /**
-   * `GET /v2/projects`: el catálogo con id y nombre de cada proyecto.
+   * `GET /v2/users/:login/projects_users`: los proyectos de una persona.
    *
-   * `projects_users` solo trae `project: { id }`, sin nombre, y el front
-   * necesita el nombre para pintar la lista. Sin este catálogo, la tabla
-   * `projects` quedaría vacía y las claves foráneas no dejarían guardar
-   * ninguna pertenencia.
-   */
-  async getProjectCatalog(): Promise<
-    readonly { id: number; name: string; slug?: string | null }[]
-  > {
-    return this.fetchAllPages<{ id: number; name: string; slug?: string | null }>('/projects')
-  }
-
-  /**
-   * `GET /v2/users/:login/projects_users`: el estado en cada proyecto.
-   *
-   * Es la única fuente de `in_progress` / `finished` que usa Sanatorio. Nótese
-   * que cada elemento trae `project: { id }` pero no el nombre, así que el
-   * catálogo de nombres hay que sacarlo de otro sitio.
+   * Son una o dos páginas (alguien con 40 proyectos cabe en una de 100), así que
+   * aquí sí se recorre entera. De ahí sale `GET /me/projects`.
    */
   async getUserProjects(login: string): Promise<ApiProjectUser[]> {
     return this.fetchAllPages<ApiProjectUser>(`/users/${encodeURIComponent(login)}/projects_users`)
-  }
-
-  /**
-   * `GET /v2/projects/:id/users`: quienes han pasado por el proyecto.
-   *
-   * Incluye gente que lo aprobó hace años. No trae estado, así que por sí solo
-   * no sirve para separar pacientes de especialistas.
-   */
-  async getProjectParticipants(projectId: number): Promise<ApiUser[]> {
-    return this.fetchAllPages<ApiUser>(`/projects/${projectId}/users`)
-  }
-
-  /**
-   * `GET /v2/campus/:id/users`: el censo del campus.
-   *
-   * Solo sirve para descubrir personas, no para saber dónde están: este
-   * endpoint no trae `location`. La ubicación se pide con `getUser`.
-   */
-  async getCampusUsers(campusId: number): Promise<ApiUser[]> {
-    return this.fetchAllPages<ApiUser>(`/campus/${campusId}/users`)
-  }
-
-  /**
-   * `GET /v2/users/:login`: el perfil público, con su ubicación actual.
-   *
-   * Esta es la única fuente de ubicaciones que usamos. Se comprobó que para
-   * Madrid `GET /v2/campus/:id/locations` devuelve `X-Total: 751 077`, que es
-   * el histórico de todos los puestos desde siempre, no solo los de ahora, y
-   * que no admite filtro para quedarse con las activos: 7 511 páginas contra
-   * una cuota de 1200 peticiones por hora. Por usuario sale infinitamente más
-   * barato y además sale el dato fresco.
-   */
-  async getUser(login: string): Promise<ApiUser> {
-    return this.requestV2<ApiUser>(`/users/${encodeURIComponent(login)}`)
   }
 
   // --- Paginación ---------------------------------------------------------
@@ -169,119 +148,128 @@ export class FortyTwoClient {
   /**
    * Recorre todas las páginas de un endpoint y devuelve la lista completa.
    *
-   * La API pagina con `?page=n&per_page=m`. No devuelve el total, así que el
-   * corte se hace por tamaño: si una página viene con menos elementos de los
-   * pedidos, es la última. Con `per_page=100` y menos de 100 elementos se
-   * ahorra una petición inútil.
+   * El corte es por tamaño: si una página viene con menos elementos de los
+   * pedidos, es la última. Con `per_page=100` y menos de 100 elementos se ahorra
+   * una petición inútil.
    */
-  private async fetchAllPages<T>(path: string, options: V2Options = {}): Promise<T[]> {
+  private async fetchAllPages<T>(path: string): Promise<T[]> {
     const collected: T[] = []
 
     for (let page = 1; ; page += 1) {
       const separator = path.includes('?') ? '&' : '?'
-      const url = `${this.apiV2Base}${path}${separator}page=${page}&per_page=${this.pageSize}`
+      const result = await this.requestPage<T>(
+        `${path}${separator}page=${page}&per_page=${this.pageSize}`,
+      )
+      collected.push(...result.items)
 
-      const batch = await this.requestV2<T[]>(url, options)
-      collected.push(...batch)
-
-      if (batch.length < this.pageSize) {
+      if (result.items.length < this.pageSize || collected.length > MAX_ITEMS) {
         return collected
       }
+    }
+  }
 
-      // Cinturón de seguridad: si un endpoint devolviera un array gigante sin
-      // paginar en algún borde, sin tope esto sería un bucle infinito.
-      if (collected.length > MAX_ITEMS) {
-        return collected
-      }
+  /** Una petición que devuelve un array, leyendo los metadatos de las cabeceras. */
+  private async requestPage<T>(path: string): Promise<Page<T>> {
+    const url = `${this.apiV2Base}${path}`
+    const { body, headers } = await this.requestWithRetries(url)
+
+    if (!Array.isArray(body)) {
+      throw new ApiError(`${endpointFromUrl(url)} no ha devuelto una lista`, 200, {
+        endpoint: endpointFromUrl(url),
+        code: 'bad_request',
+      })
+    }
+
+    return {
+      items: body as T[],
+      perPage: readInt(headers, 'x-per-page') ?? this.pageSize,
+      // Si la API no manda la cabecera, se asume que lo que ha venido es todo.
+      total: readInt(headers, 'x-total') ?? (body as T[]).length,
     }
   }
 
   // --- Petición -----------------------------------------------------------
 
-  /**
-   * Una petición a la API, con reintentos.
-   *
-   * @param path Ruta ya construida, o URL completa (así la usa la paginación).
-   */
-  private async requestV2<T>(
-    path: string,
-    options: V2Options & { accessToken?: string | undefined } = {},
-  ): Promise<T> {
-    const url = path.startsWith('http') ? path : `${this.apiV2Base}${path}`
+  /** Una petición con reintentos, que devuelve cuerpo y cabeceras. */
+  private async requestWithRetries(url: string): Promise<{ body: unknown; headers: Headers }> {
     const endpoint = endpointFromUrl(url)
-    const timeoutMs = options.timeoutMs ?? this.timeoutMs
+    let lastError: ApiError | null = null
 
-    // Cada intento pasa por el limitador: los reintentos también cuentan.
-    return this.limiter.run(async () => {
-      let lastError: ApiError | null = null
+    for (let attempt = 0; ; attempt += 1) {
+      // Cada intento pasa por el ritmo: los reintentos también cuentan, y saltarse
+      // el control aquí convertiría un 503 en un 429.
+      await this.throttle.before()
 
-      for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
-        const token = options.accessToken ?? (await this.resolveToken())
+      try {
+        const response = await this.fetchOnce(url)
 
-        try {
-          return await this.attemptFetch<T>(url, token, timeoutMs)
-        } catch (cause) {
-          if (!(cause instanceof ApiError)) {
-            throw cause
-          }
-
-          lastError = cause
-
-          // Un 401 con token de app no se arregla reintentando. Se descarta el
-          // token por si estuviera caducado, pero se da por perdido el intento.
-          if (cause.status === 401 && options.accessToken === undefined) {
-            this.tokens.invalidate()
-          }
-
-          if (!cause.retryable || attempt === this.maxRetries) {
-            throw cause
-          }
-
-          await this.sleep(this.backoffFor(attempt, cause.retryAfterSeconds))
+        if (!response.ok) {
+          throw apiErrorFromResponse(
+            response.status,
+            endpoint,
+            await response.text(),
+            response.headers,
+          )
         }
-      }
 
-      // El bucle siempre devuelve o lanza; esto es solo para que el compilador
-      // no se queje de una ruta de retorno imposible.
-      throw (
-        lastError ??
-        new ApiError('Petición fallida sin error', 0, {
-          endpoint,
-          code: 'network_error',
-        })
-      )
-    })
+        return { body: await response.json(), headers: response.headers }
+      } catch (cause) {
+        if (!(cause instanceof ApiError)) {
+          throw cause
+        }
+
+        lastError = cause
+
+        // Aunque la respuesta sea un error, las cabeceras de cuota vienen igual,
+        // y son las que dicen cuándo se podrá volver a pedir.
+        if (cause.headers !== undefined) {
+          this.throttle.observe(cause.headers)
+        }
+
+        // Un 401 con token de app no se arregla reintentando. Se descarta el
+        // token por si estuviera caducado, pero se da por perdido el intento.
+        if (cause.status === 401) {
+          this.tokens.invalidate()
+        }
+
+        if (!cause.retryable || attempt >= this.maxRetries) {
+          throw cause
+        }
+
+        await this.sleep(this.backoffFor(attempt, cause.retryAfterSeconds))
+      }
+    }
+
+    // El bucle de arriba siempre devuelve o lanza; esto es solo para que el
+    // compilador no se queje de una ruta de retorno imposible.
+    throw (
+      lastError ??
+      new ApiError('Petición fallida sin error', 0, { endpoint, code: 'network_error' })
+    )
   }
 
   /** Un intento de `fetch`, con timeout. */
-  private async attemptFetch<T>(url: string, token: string, timeoutMs: number): Promise<T> {
-    let response: Response
+  private async fetchOnce(url: string): Promise<Response> {
+    const token = await this.tokens.getToken()
+
     try {
-      response = await this.fetchImpl(url, {
+      const response = await this.fetchImpl(url, {
         headers: {
           Authorization: `Bearer ${token}`,
           'User-Agent': this.userAgent,
           Accept: 'application/json',
         },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(this.timeoutMs),
       })
+
+      this.throttle.observe(response.headers)
+
+      return response
     } catch (cause) {
       // `AbortSignal.timeout` lanza un `TimeoutError`. Lo mapeamos al error
       // tipado para que el reintento y los logs lo traten como timeout.
       throw apiErrorFromNetwork(endpointFromUrl(url), cause)
     }
-
-    if (!response.ok) {
-      const raw = await response.text()
-      throw apiErrorFromResponse(response.status, endpointFromUrl(url), raw, response.headers)
-    }
-
-    return (await response.json()) as T
-  }
-
-  /** Token a usar: el inyectado en tests o el del gestor. */
-  private resolveToken(): Promise<string> {
-    return this.tokenProvider?.() ?? this.tokens.getToken()
   }
 
   /**
@@ -289,22 +277,33 @@ export class FortyTwoClient {
    *
    * Si la API mandó `Retry-After`, se hace caso: es ella quien sabe cuándo
    * termina el límite. Si no, backoff exponencial con un tope, porque esperar
-   * 2^n sin tope puede pasar de 30 s a 30 minutos.
+   * 2^n sin tope puede pasar de 10 s a horas.
    */
   private backoffFor(attempt: number, retryAfterSeconds: number | undefined): number {
     if (retryAfterSeconds !== undefined) {
       return Math.min(retryAfterSeconds * 1000, this.backoffMaxMs)
     }
     const exponential = this.backoffBaseMs * 2 ** attempt
-    // Un poco de dispersión: si varios sincronizadores fallan a la vez, no
-    // vuelven a caer a la vez.
+    // Un poco de dispersión: si varias peticiones fallan a la vez, no se vuelven
+    // a caer a la vez.
     const jitter = Math.random() * this.backoffBaseMs
+
     return Math.min(exponential + jitter, this.backoffMaxMs)
   }
 }
 
-/** Tope de elementos acumulados al paginar. */
-const MAX_ITEMS = 20_000
+/** Lee una cabecera como entero. `undefined` si no está o no es un número. */
+function readInt(headers: Headers, name: string): number | undefined {
+  const raw = headers.get(name)
+
+  if (raw === null || raw.trim() === '') {
+    return undefined
+  }
+
+  const parsed = Number(raw)
+
+  return Number.isNaN(parsed) ? undefined : parsed
+}
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {

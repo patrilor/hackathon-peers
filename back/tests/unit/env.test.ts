@@ -1,181 +1,196 @@
 /**
- * Tests de la carga de configuración.
+ * Tests de la configuración.
  *
- * Comprueban lo que de verdad puede salir mal: variables que faltan, valores
- * mal formados y el detalle fino de CORS, que es donde se rompe el login.
+ * El valor de leer y validar el entorno una sola vez al arrancar está en que un
+ * error de configuración sale como un mensaje claro en el log de arranque, y no
+ * como un `undefined` que explota tres módulos más abajo y en mitad de una
+ * petición. Estos tests fijan ese comportamiento: qué es obligatorio, qué tiene
+ * un valor por defecto razonable, y qué se deriva.
  */
 
 import { describe, expect, it } from 'vitest'
-import { loadEnv, REQUIRED_ENV_VARS } from '../../src/config/env.js'
 
-/** Entorno válido de partida. Cada test altera solo lo que necesita. */
-function validEnv(): Record<string, string> {
-  return {
-    FORTY_TWO_UID: 'u-s4t2ud-demo',
-    FORTY_TWO_SECRET: 's-s4t2ud-demo',
-    FRONTEND_ORIGINS: 'http://localhost:5173',
-    FORTY_TWO_REDIRECT_URI: 'http://localhost:3000/auth/callback',
-    SESSION_SECRET: 'un-secreto-razonablemente-largo',
-    FRONTEND_URL: 'http://localhost:5173',
-  }
+import { loadEnv, REQUIRED_ENV_VARS } from '../../src/config/env.js'
+import type { Env } from '../../src/config/env.js'
+
+/** Lo mínimo imprescindible, tal y como se define en `REQUIRED_ENV_VARS`. */
+const MINIMO: NodeJS.ProcessEnv = {
+  FORTY_TWO_UID: 'u-test',
+  FORTY_TWO_SECRET: 's-test',
+  FORTY_TWO_REDIRECT_URI: 'https://sanatorio-42.vercel.app/api/auth/callback',
+  SESSION_SECRET: 'secreto-de-sesion-para-pruebas',
+  FRONTEND_URL: 'https://sanatorio-42.vercel.app',
 }
 
-describe('loadEnv', () => {
-  it('carga un entorno válido y aplica los valores por defecto', () => {
-    const env = loadEnv(validEnv())
+describe('configuración', () => {
+  it('arranca con solo las variables obligatorias', () => {
+    const env = loadEnv(MINIMO)
 
-    expect(env.PORT).toBe(3000)
-    expect(env.CURSUS_ID).toBe(21)
-    expect(env.PAGE_SIZE).toBe(100)
-    expect(env.DATABASE_PATH).toBe('data/sanatorio.db')
+    expect(env.FORTY_TWO_UID).toBe('u-test')
+    expect(env.FRONTEND_URL).toBe('https://sanatorio-42.vercel.app')
   })
 
-  it.each(REQUIRED_ENV_VARS)('falla si falta %s', (variable) => {
-    const source = validEnv()
-    // `Reflect.deleteProperty` en vez de `delete`: la clave es dinámica.
-    Reflect.deleteProperty(source, variable)
+  it('falla si falta cada una de las obligatorias', () => {
+    for (const variable of REQUIRED_ENV_VARS) {
+      // `Reflect.deleteProperty` y no `delete`: la clave se calcula en tiempo de
+      // ejecución, y borrarla a lo bruto no está permitido.
+      const sinLaVariable: NodeJS.ProcessEnv = { ...MINIMO }
+      Reflect.deleteProperty(sinLaVariable, variable)
 
-    expect(() => loadEnv(source)).toThrow()
+      expect(() => loadEnv(sinLaVariable)).toThrow()
+    }
   })
 
   it('rechaza un SESSION_SECRET demasiado corto', () => {
-    const source = { ...validEnv(), SESSION_SECRET: 'corto' }
-
-    expect(() => loadEnv(source)).toThrow(/16 caracteres/)
-  })
-
-  it('rechaza una redirect_uri que no es URL', () => {
-    const source = { ...validEnv(), FORTY_TWO_REDIRECT_URI: 'no-es-una-url' }
-
-    expect(() => loadEnv(source)).toThrow(/URL válida/)
-  })
-
-  it('convierte los números de cadena en número', () => {
-    const env = loadEnv({ ...validEnv(), PORT: '8080' })
-
-    expect(env.PORT).toBe(8080)
-  })
-
-  it('rechaza un puerto que no es un número', () => {
-    expect(() => loadEnv({ ...validEnv(), PORT: 'mil' })).toThrow()
-  })
-
-  it('limita PAGE_SIZE al máximo de la API', () => {
-    expect(() => loadEnv({ ...validEnv(), PAGE_SIZE: '500' })).toThrow()
-  })
-})
-
-describe('orígenes permitidos para CORS', () => {
-  it('acepta varios orígenes separados por comas', () => {
-    const env = loadEnv({
-      ...validEnv(),
-      FRONTEND_ORIGINS: 'http://localhost:5173,https://sanatorio-42.vercel.app',
-    })
-
-    expect(env.allowedOrigins).toEqual(['http://localhost:5173', 'https://sanatorio-42.vercel.app'])
-  })
-
-  it('acepta espacios como separador y quita la barra final', () => {
-    const env = loadEnv({
-      ...validEnv(),
-      FRONTEND_ORIGINS: 'http://localhost:5173 https://otro.example/',
-    })
-
-    expect(env.allowedOrigins).toEqual(['http://localhost:5173', 'https://otro.example'])
-  })
-
-  it('falla si la lista se queda vacía tras limpiar', () => {
-    expect(() => loadEnv({ ...validEnv(), FRONTEND_ORIGINS: ' , ' })).toThrow(
-      /ningún origen válido/,
+    // Menos de 16 caracteres: la firma HMAC dejaría de ser creíble.
+    expect(() => loadEnv({ ...MINIMO, SESSION_SECRET: 'corto' })).toThrow(
+      /SESSION_SECRET debe tener al menos 16 caracteres/,
     )
   })
 
-  it('devuelve un objeto congelado para que nadie lo mute en runtime', () => {
-    const env = loadEnv(validEnv())
-
-    expect(Object.isFrozen(env)).toBe(true)
+  it('rechaza URLs que no son URLs', () => {
+    expect(() => loadEnv({ ...MINIMO, FRONTEND_URL: 'no-es-una-url' })).toThrow(
+      /FRONTEND_URL debe ser una URL válida/,
+    )
+    expect(() =>
+      loadEnv({ ...MINIMO, FORTY_TWO_REDIRECT_URI: 'sin-protocolo' }),
+    ).toThrow(/FORTY_TWO_REDIRECT_URI debe ser una URL válida/)
   })
-})
-describe('configuración de la API de 42', () => {
-  it('deriva la raíz de la API v2 con barra final', () => {
-    // La barra importa: si falta, las URLs quedan `https://api.intra.42.frv2/me`.
-    const env = loadEnv({ ...validEnv(), FORTY_TWO_API_BASE: 'https://api.intra.42.fr/' })
+
+  it('añade /v2 a la raíz de la API y le quita la barra final', () => {
+    const env = loadEnv({ ...MINIMO, FORTY_TWO_API_BASE: 'https://api.intra.42.fr/' })
+
     expect(env.apiV2Base).toBe('https://api.intra.42.fr/v2')
   })
 
-  it('acepta una base de API alternativa para los tests', () => {
-    const env = loadEnv({
-      ...validEnv(),
-      FORTY_TWO_API_BASE: 'http://127.0.0.1:4010',
-      FORTY_TWO_TOKEN_URL: 'http://127.0.0.1:4010/oauth/token',
+  it('acepta la API real por defecto, sin tener que declararla', () => {
+    expect(loadEnv(MINIMO).apiV2Base).toBe('https://api.intra.42.fr/v2')
+  })
+
+  it('acepta FRONTEND_URL con barra final', () => {
+    const env = loadEnv({ ...MINIMO, FRONTEND_URL: 'https://sanatorio-42.vercel.app/' })
+
+    expect(env.allowedOrigins).toEqual(['https://sanatorio-42.vercel.app'])
+  })
+
+  describe('orígenes permitidos', () => {
+    it('usa solo FRONTEND_URL si no se declara FRONTEND_ORIGINS', () => {
+      const env = loadEnv(MINIMO)
+
+      expect(env.allowedOrigins).toEqual(['https://sanatorio-42.vercel.app'])
     })
 
-    expect(env.apiV2Base).toBe('http://127.0.0.1:4010/v2')
-  })
+    it('acepta varios orígenes separados por coma o por espacios', () => {
+      const env = loadEnv({
+        ...MINIMO,
+        FRONTEND_ORIGINS: 'http://localhost:5173, https://sanatorio-42.vercel.app/',
+      })
 
-  it('pone un User-Agent por defecto, porque la API devuelve 403 sin él', () => {
-    const env = loadEnv(validEnv())
-
-    expect(env.FORTY_TWO_USER_AGENT).toContain('sanatorio-42')
-  })
-
-  it('permite sobreescribir el User-Agent', () => {
-    const env = loadEnv({ ...validEnv(), FORTY_TWO_USER_AGENT: 'mi-proxy/2.0' })
-
-    expect(env.FORTY_TWO_USER_AGENT).toBe('mi-proxy/2.0')
-  })
-
-  it('expone el origen del callback de OAuth', () => {
-    const env = loadEnv({
-      ...validEnv(),
-      FORTY_TWO_REDIRECT_URI: 'https://api.sanatorio.example/auth/callback',
+      expect(env.allowedOrigins).toEqual([
+        'http://localhost:5173',
+        'https://sanatorio-42.vercel.app',
+      ])
     })
 
-    expect(env.oauthRedirectOrigin).toBe('https://api.sanatorio.example')
+    it('ignora entradas vacías', () => {
+      const env = loadEnv({ ...MINIMO, FRONTEND_ORIGINS: ' , , http://localhost:5173 ' })
+
+      expect(env.allowedOrigins).toEqual(['http://localhost:5173'])
+    })
   })
 
-  it('detecta si el callback apunta al front en vez de al backend', () => {
-    // El error clásico: registrar la URL de Vercel como callback. El código
-    // llega al front, que no tiene esa ruta, y el login falla en silencio.
-    const front = loadEnv({
-      ...validEnv(),
-      FORTY_TWO_REDIRECT_URI: 'https://sanatorio-42.vercel.app/auth/callback',
+  describe('scopes de OAuth', () => {
+    it('pide public y profile por defecto, porque sin profile no hay /v2/me', () => {
+      expect(loadEnv(MINIMO).oauthScopes).toEqual(['public', 'profile'])
     })
 
-    expect(front.oauthRedirectOrigin).toBe('https://sanatorio-42.vercel.app')
-    expect(front.oauthRedirectOrigin).not.toBe(front.allowedOrigins[0])
-  })
-})
+    it('acepta coma o espacios, y quita las entradas vacías', () => {
+      const env = loadEnv({ ...MINIMO, FORTY_TWO_SCOPES: 'public,  ,profile' })
 
-describe('scopes de OAuth', () => {
-  it('por defecto pide public y profile', () => {
-    // El panel de la app 78735 llama `profile` al scope de datos de usuario.
-    // Si algún día lo renombran, se cambia en el .env y no en el código.
-    expect(loadEnv(validEnv()).oauthScopes).toEqual(['public', 'profile'])
+      // Un scope en blanco sí llega a la URL de autorización, y 42 responde
+      // `invalid_scope` sin decir cuál sobra.
+      expect(env.oauthScopes).toEqual(['public', 'profile'])
+    })
   })
 
-  it('acepta coma o espacios como separador', () => {
-    expect(loadEnv({ ...validEnv(), FORTY_TWO_SCOPES: 'public, profile' }).oauthScopes).toEqual([
-      'public',
-      'profile',
-    ])
-    expect(
-      loadEnv({ ...validEnv(), FORTY_TWO_SCOPES: '  public   profile  ' }).oauthScopes,
-    ).toEqual(['public', 'profile'])
+  describe('base de datos', () => {
+    it('usa un fichero local por defecto, sin pedir token', () => {
+      const env = loadEnv(MINIMO)
+
+      expect(env.DATABASE_URL).toBe('file:data/sanatorio.db')
+      expect(env.isLocalFile).toBe(true)
+    })
+
+    it('exige TURSO_AUTH_TOKEN cuando la base es un servidor de Turso', () => {
+      expect(() =>
+        loadEnv({ ...MINIMO, DATABASE_URL: 'libsql://sanatorio.turso.io' }),
+      ).toThrow(/TURSO_AUTH_TOKEN está vacía/)
+    })
+
+    it('acepta Turso con su token', () => {
+      const env = loadEnv({
+        ...MINIMO,
+        DATABASE_URL: 'libsql://sanatorio.turso.io',
+        TURSO_AUTH_TOKEN: 'token-de-turso',
+      })
+
+      expect(env.isLocalFile).toBe(false)
+      expect(env.TURSO_AUTH_TOKEN).toBe('token-de-turso')
+    })
+
+    it('ignora el token si la base es un fichero local', () => {
+      // En desarrollo puede haber un token de Turso en el `.env` sin que estorbe.
+      const env = loadEnv({ ...MINIMO, DATABASE_URL: 'file::memory:' })
+
+      expect(env.isLocalFile).toBe(true)
+    })
   })
 
-  it('quita los scopes en blanco', () => {
-    // Un espacio de más llega a la URL como `scope=public  profile`, y 42
-    // responde invalid_scope sin decir cuál sobra.
-    expect(loadEnv({ ...validEnv(), FORTY_TWO_SCOPES: 'public ,  profile' }).oauthScopes).toEqual([
-      'public',
-      'profile',
-    ])
+  describe('caché contra la API de 42', () => {
+    it('trae presupuestos pensados para caber en una función de Vercel', () => {
+      const env = loadEnv(MINIMO)
+
+      // 100 es el máximo por página de la API de 42.
+      expect(env.PAGE_SIZE).toBe(100)
+      // 5 páginas son ~2,5 s con el límite de 2 peticiones por segundo: por debajo
+      // del límite de duración de una función en el plan gratuito.
+      expect(env.PEERS_PAGE_BUDGET).toBe(5)
+      expect(env.PEERS_TTL_SECONDS).toBe(900)
+      expect(env.USER_PROJECTS_TTL_SECONDS).toBe(1800)
+    })
+
+    it('lee los números de las cadenas de entorno', () => {
+      const env = loadEnv({ ...MINIMO, PAGE_SIZE: '50', PEERS_PAGE_BUDGET: '2' })
+
+      expect(env.PAGE_SIZE).toBe(50)
+      expect(env.PEERS_PAGE_BUDGET).toBe(2)
+    })
+
+    it('no deja pasar un PAGE_SIZE por encima del tope de la API', () => {
+      // Aunque se pase 500, la API nunca manda más de 100 por página.
+      expect(() => loadEnv({ ...MINIMO, PAGE_SIZE: '500' })).toThrow()
+    })
+
+    it('rechaza un presupuesto de páginas negativo o cero', () => {
+      expect(() => loadEnv({ ...MINIMO, PEERS_PAGE_BUDGET: '0' })).toThrow()
+      expect(() => loadEnv({ ...MINIMO, PEERS_PAGE_BUDGET: '-1' })).toThrow()
+    })
+
+    it('admite un intervalo mínimo de 0, que es "solo manda la API"', () => {
+      // Los tests y el desarrollo local no quieren el suelo: lo que manda son las
+      // cabeceras de cuota.
+      expect(loadEnv({ ...MINIMO, MIN_REQUEST_INTERVAL_MS: '0' }).MIN_REQUEST_INTERVAL_MS).toBe(0)
+      // Un intervalo negativo no tiene sentido.
+      expect(() => loadEnv({ ...MINIMO, MIN_REQUEST_INTERVAL_MS: '-1' })).toThrow()
+    })
   })
 
-  it('deja cambiar los scopes sin tocar el código', () => {
-    const env = loadEnv({ ...validEnv(), FORTY_TWO_SCOPES: 'public profile projects' })
+  it('devuelve un objeto congelado, para que nadie lo modifique en caliente', () => {
+    const env: Env = loadEnv(MINIMO)
 
-    expect(env.oauthScopes).toEqual(['public', 'profile', 'projects'])
+    expect(Object.isFrozen(env)).toBe(true)
+    expect(() => {
+      ;(env as { PORT: number }).PORT = 4000
+    }).toThrow()
   })
 })

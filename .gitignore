@@ -2,3 +2,7 @@
 node_modules/
 dist/
 prompt.md
+
+# Entorno local de Python (venv del equipo) y bases de datos locales.
+.venv/
+back/data/
